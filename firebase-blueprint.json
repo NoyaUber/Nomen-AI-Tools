@@ -1,0 +1,493 @@
+{
+  "entities": {
+    "Profile": {
+      "title": "Profile",
+      "description": "Private user profile for a worldbuilding studio author.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the user."
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Author display name."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254,
+          "description": "Author email address (PII, owner-restricted)."
+        },
+        "defaultGenre": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Preferred writing genre."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": ["ownerId", "displayName", "email", "defaultGenre", "createdAt", "updatedAt"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "An isolated fictional universe or writing project.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "genre": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "worldSettings": {
+          "type": "string",
+          "maxLength": 6000
+        },
+        "language": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"],
+          "maxLength": 20
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "title", "description", "genre", "worldSettings", "language", "status", "createdAt", "updatedAt"]
+    },
+    "Entity": {
+      "title": "Entity",
+      "description": "A canonical worldbuilding entity (character, location, organization, item, ability, etc.).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["character", "location", "organization", "family", "item", "ability", "species", "civilization", "custom"],
+          "maxLength": 40
+        },
+        "subCategory": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "parentId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "attributes": {
+          "type": "object",
+          "description": "Category-specific structured attributes map."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "category", "subCategory", "name", "subtitle", "summary", "parentId", "attributes", "createdAt", "updatedAt"]
+    },
+    "EntityRelation": {
+      "title": "EntityRelation",
+      "description": "A relationship between two fictional entities within a project.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceEntityId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceEntityName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "targetEntityId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetEntityName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "relationType": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "sourceEntityId", "sourceEntityName", "targetEntityId", "targetEntityName", "relationType", "description", "createdAt", "updatedAt"]
+    },
+    "LoreEntry": {
+      "title": "LoreEntry",
+      "description": "Historical, mythological, cultural, or political lore chronicle.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "era": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "title", "category", "era", "summary", "content", "createdAt", "updatedAt"]
+    },
+    "TimelineEvent": {
+      "title": "TimelineEvent",
+      "description": "A chronological historical event within a project timeline.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "dateLabel": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "sortOrder": {
+          "type": "number"
+        },
+        "era": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "locationName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "participants": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 6000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "title", "dateLabel", "sortOrder", "era", "category", "locationName", "participants", "description", "createdAt", "updatedAt"]
+    },
+    "NamingRule": {
+      "title": "NamingRule",
+      "description": "Custom linguistic or cultural naming convention for a project.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "cultureOrGroup": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "phoneticPattern": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "prefixSuffixRule": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "structureRule": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "examples": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "title", "category", "cultureOrGroup", "phoneticPattern", "prefixSuffixRule", "structureRule", "examples", "isActive", "createdAt", "updatedAt"]
+    },
+    "AiGeneration": {
+      "title": "AiGeneration",
+      "description": "Record of an AI naming or worldbuilding generation request.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "generationType": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "promptSummary": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "resultsSummary": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "modelUsed": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "generationType", "category", "promptSummary", "resultsSummary", "modelUsed", "createdAt"]
+    },
+    "Favorite": {
+      "title": "Favorite",
+      "description": "Saved favorite name candidate or worldbuilding snippet.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "pronunciation": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "interpretation": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "inspiration": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "suitability": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "titleOrVariation": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "name", "pronunciation", "category", "interpretation", "inspiration", "suitability", "titleOrVariation", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/profiles/{userId}": {
+      "schema": "Profile",
+      "description": "Private user profiles keyed by Firebase Auth UID."
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Author writing projects."
+    },
+    "/entities/{entityId}": {
+      "schema": "Entity",
+      "description": "Fictional entities belonging to a project."
+    },
+    "/entity_relations/{relationId}": {
+      "schema": "EntityRelation",
+      "description": "Relationships between fictional entities."
+    },
+    "/lore_entries/{loreId}": {
+      "schema": "LoreEntry",
+      "description": "Lore and historical documents."
+    },
+    "/timeline_events/{eventId}": {
+      "schema": "TimelineEvent",
+      "description": "Chronological timeline events."
+    },
+    "/naming_rules/{ruleId}": {
+      "schema": "NamingRule",
+      "description": "Custom naming conventions per project."
+    },
+    "/ai_generations/{generationId}": {
+      "schema": "AiGeneration",
+      "description": "History of AI naming and worldbuilding generations."
+    },
+    "/favorites/{favoriteId}": {
+      "schema": "Favorite",
+      "description": "Favorited name candidates and generated items."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "NOMEN — AI Worldbuilding Studio",
+  "description": "An AI-powered creative workspace and connected worldbuilding platform for novelists, fantasy writers, and storytellers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

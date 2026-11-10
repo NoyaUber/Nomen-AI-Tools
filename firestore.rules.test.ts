@@ -1,0 +1,207 @@
+/**
+ * Security Rules Specification Test Suite for NOMEN — AI Worldbuilding Studio
+ * Verifies that all "Dirty Dozen" adversarial payloads are rejected with PERMISSION_DENIED.
+ */
+
+export interface DirtyDozenTestCase {
+  id: number;
+  name: string;
+  collection: string;
+  docId: string;
+  operation: 'get' | 'list' | 'create' | 'update' | 'delete';
+  auth: { uid: string; email: string; email_verified: boolean } | null;
+  payload?: Record<string, unknown>;
+  expectedResult: 'PERMISSION_DENIED';
+}
+
+export const DIRTY_DOZEN_TEST_CASES: DirtyDozenTestCase[] = [
+  {
+    id: 1,
+    name: 'Identity Spoofing on Project Create',
+    collection: 'projects',
+    docId: 'proj_1',
+    operation: 'create',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_B',
+      title: 'Spoofed Project',
+      description: 'Desc',
+      genre: 'Fantasy',
+      worldSettings: 'Settings',
+      language: 'English',
+      status: 'active',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 2,
+    name: 'Unverified Email Write',
+    collection: 'projects',
+    docId: 'proj_2',
+    operation: 'create',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: false },
+    payload: {
+      ownerId: 'user_A',
+      title: 'Unverified Project',
+      description: 'Desc',
+      genre: 'Fantasy',
+      worldSettings: 'Settings',
+      language: 'English',
+      status: 'active',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 3,
+    name: 'PII Leak on Profiles',
+    collection: 'profiles',
+    docId: 'user_A',
+    operation: 'get',
+    auth: { uid: 'user_B', email: 'b@example.com', email_verified: true },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 4,
+    name: 'Cross-Tenant Project Read',
+    collection: 'projects',
+    docId: 'proj_owned_by_A',
+    operation: 'get',
+    auth: { uid: 'user_B', email: 'b@example.com', email_verified: true },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 5,
+    name: 'Orphaned Entity Creation',
+    collection: 'entities',
+    docId: 'ent_1',
+    operation: 'create',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_A',
+      projectId: 'non_existent_project',
+      category: 'character',
+      subCategory: 'Protagonist',
+      name: 'Kaelen',
+      subtitle: 'Knight',
+      summary: 'Summary',
+      parentId: '',
+      attributes: {},
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 6,
+    name: 'Cross-Tenant Entity Injection',
+    collection: 'entities',
+    docId: 'ent_2',
+    operation: 'create',
+    auth: { uid: 'user_B', email: 'b@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_B',
+      projectId: 'proj_owned_by_A',
+      category: 'character',
+      subCategory: 'Protagonist',
+      name: 'Intruder',
+      subtitle: '',
+      summary: '',
+      parentId: '',
+      attributes: {},
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 7,
+    name: 'Shadow Field Injection on Project Update',
+    collection: 'projects',
+    docId: 'proj_1',
+    operation: 'update',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_A',
+      title: 'Updated',
+      isAdmin: true,
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 8,
+    name: 'Immutable Field Mutation (projectId on Entity)',
+    collection: 'entities',
+    docId: 'ent_1',
+    operation: 'update',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_A',
+      projectId: 'different_project_id',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 9,
+    name: 'Client Timestamp Forgery',
+    collection: 'projects',
+    docId: 'proj_3',
+    operation: 'create',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_A',
+      title: 'Forged Time',
+      description: '',
+      genre: 'Sci-Fi',
+      worldSettings: '',
+      language: 'English',
+      status: 'active',
+      createdAt: '1999-01-01T00:00:00Z',
+      updatedAt: '1999-01-01T00:00:00Z',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 10,
+    name: 'Denial-of-Wallet Oversized String',
+    collection: 'projects',
+    docId: 'proj_4',
+    operation: 'create',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_A',
+      title: 'X'.repeat(500),
+      description: '',
+      genre: 'Fantasy',
+      worldSettings: '',
+      language: 'English',
+      status: 'active',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 11,
+    name: 'ID Poisoning Attack',
+    collection: 'projects',
+    docId: 'bad$id/with spaces!',
+    operation: 'create',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      ownerId: 'user_A',
+      title: 'Valid Title',
+      description: '',
+      genre: 'Fantasy',
+      worldSettings: '',
+      language: 'English',
+      status: 'active',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 12,
+    name: 'Invalid Enum State on Project Status',
+    collection: 'projects',
+    docId: 'proj_1',
+    operation: 'update',
+    auth: { uid: 'user_A', email: 'a@example.com', email_verified: true },
+    payload: {
+      status: 'corrupted_status',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+];

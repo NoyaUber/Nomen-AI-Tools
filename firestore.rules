@@ -1,0 +1,401 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function ownsProject(projectId) {
+      return isValidId(projectId)
+        && exists(/databases/$(database)/documents/projects/$(projectId))
+        && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
+    }
+
+    // Validation Blueprints
+    function isValidProfile(data) {
+      return data.keys().hasAll(['ownerId', 'displayName', 'email', 'defaultGenre', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'displayName', 'email', 'defaultGenre', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.defaultGenre is string && data.defaultGenre.size() <= 80
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProject(data) {
+      return data.keys().hasAll(['ownerId', 'title', 'description', 'genre', 'worldSettings', 'language', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'title', 'description', 'genre', 'worldSettings', 'language', 'status', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.description is string && data.description.size() <= 4000
+        && data.genre is string && data.genre.size() <= 100
+        && data.worldSettings is string && data.worldSettings.size() <= 6000
+        && data.language is string && data.language.size() <= 60
+        && data.status is string && data.status.size() <= 20 && (data.status == 'active' || data.status == 'archived')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEntity(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'category', 'subCategory', 'name', 'subtitle', 'summary', 'parentId', 'attributes', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'category', 'subCategory', 'name', 'subtitle', 'summary', 'parentId', 'attributes', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.category is string && data.category.size() <= 40
+        && (data.category == 'character' || data.category == 'location' || data.category == 'organization' || data.category == 'family' || data.category == 'item' || data.category == 'ability' || data.category == 'species' || data.category == 'civilization' || data.category == 'custom')
+        && data.subCategory is string && data.subCategory.size() <= 100
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
+        && data.subtitle is string && data.subtitle.size() <= 300
+        && data.summary is string && data.summary.size() <= 4000
+        && data.parentId is string && data.parentId.size() <= 128
+        && data.attributes is map && data.attributes.size() <= 50
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEntityRelation(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'sourceEntityId', 'sourceEntityName', 'targetEntityId', 'targetEntityName', 'relationType', 'description', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'sourceEntityId', 'sourceEntityName', 'targetEntityId', 'targetEntityName', 'relationType', 'description', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && isValidId(data.sourceEntityId)
+        && data.sourceEntityName is string && data.sourceEntityName.size() >= 1 && data.sourceEntityName.size() <= 200
+        && isValidId(data.targetEntityId)
+        && data.targetEntityName is string && data.targetEntityName.size() >= 1 && data.targetEntityName.size() <= 200
+        && data.relationType is string && data.relationType.size() >= 1 && data.relationType.size() <= 120
+        && data.description is string && data.description.size() <= 2000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLoreEntry(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'title', 'category', 'era', 'summary', 'content', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'title', 'category', 'era', 'summary', 'content', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 240
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && data.era is string && data.era.size() <= 120
+        && data.summary is string && data.summary.size() <= 2000
+        && data.content is string && data.content.size() <= 20000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTimelineEvent(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'title', 'dateLabel', 'sortOrder', 'era', 'category', 'locationName', 'participants', 'description', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'title', 'dateLabel', 'sortOrder', 'era', 'category', 'locationName', 'participants', 'description', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 240
+        && data.dateLabel is string && data.dateLabel.size() >= 1 && data.dateLabel.size() <= 120
+        && (data.sortOrder is int || data.sortOrder is float)
+        && data.era is string && data.era.size() <= 120
+        && data.category is string && data.category.size() <= 80
+        && data.locationName is string && data.locationName.size() <= 200
+        && data.participants is string && data.participants.size() <= 1000
+        && data.description is string && data.description.size() <= 6000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNamingRule(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'title', 'category', 'cultureOrGroup', 'phoneticPattern', 'prefixSuffixRule', 'structureRule', 'examples', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'title', 'category', 'cultureOrGroup', 'phoneticPattern', 'prefixSuffixRule', 'structureRule', 'examples', 'isActive', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && data.cultureOrGroup is string && data.cultureOrGroup.size() <= 160
+        && data.phoneticPattern is string && data.phoneticPattern.size() <= 1000
+        && data.prefixSuffixRule is string && data.prefixSuffixRule.size() <= 1000
+        && data.structureRule is string && data.structureRule.size() <= 1000
+        && data.examples is string && data.examples.size() <= 1000
+        && data.isActive is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAiGeneration(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'generationType', 'category', 'promptSummary', 'resultsSummary', 'modelUsed', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'generationType', 'category', 'promptSummary', 'resultsSummary', 'modelUsed', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.generationType is string && data.generationType.size() >= 1 && data.generationType.size() <= 60
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && data.promptSummary is string && data.promptSummary.size() <= 2000
+        && data.resultsSummary is string && data.resultsSummary.size() <= 8000
+        && data.modelUsed is string && data.modelUsed.size() <= 80
+        && data.createdAt is timestamp;
+    }
+
+    function isValidFavorite(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'name', 'pronunciation', 'category', 'interpretation', 'inspiration', 'suitability', 'titleOrVariation', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'name', 'pronunciation', 'category', 'interpretation', 'inspiration', 'suitability', 'titleOrVariation', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
+        && data.pronunciation is string && data.pronunciation.size() <= 200
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && data.interpretation is string && data.interpretation.size() <= 2000
+        && data.inspiration is string && data.inspiration.size() <= 2000
+        && data.suitability is string && data.suitability.size() <= 2000
+        && data.titleOrVariation is string && data.titleOrVariation.size() <= 500
+        && data.createdAt is timestamp;
+    }
+
+    // 1. PROFILES (PII Isolated to strict owner)
+    match /profiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidProfile(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'defaultGenre', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 2. PROJECTS
+    match /projects/{projectId} {
+      allow get: if isSignedIn() && isValidId(projectId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(projectId)
+        && isValidProject(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(projectId)
+        && isValidProject(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Edit Project Metadata
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'genre', 'worldSettings', 'language', 'status', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(projectId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 3. ENTITIES
+    match /entities/{entityId} {
+      allow get: if isSignedIn() && isValidId(entityId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(entityId)
+        && isValidEntity(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if isVerifiedUser()
+        && isValidId(entityId)
+        && isValidEntity(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Edit Entity Details
+          incoming().diff(existing()).affectedKeys().hasOnly(['category', 'subCategory', 'name', 'subtitle', 'summary', 'parentId', 'attributes', 'updatedAt'])
+        )
+        && ownsProject(existing().projectId);
+      allow delete: if isVerifiedUser()
+        && isValidId(entityId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 4. ENTITY RELATIONS
+    match /entity_relations/{relationId} {
+      allow get: if isSignedIn() && isValidId(relationId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(relationId)
+        && isValidEntityRelation(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if isVerifiedUser()
+        && isValidId(relationId)
+        && isValidEntityRelation(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update Relation Details
+          incoming().diff(existing()).affectedKeys().hasOnly(['sourceEntityId', 'sourceEntityName', 'targetEntityId', 'targetEntityName', 'relationType', 'description', 'updatedAt'])
+        )
+        && ownsProject(existing().projectId);
+      allow delete: if isVerifiedUser()
+        && isValidId(relationId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 5. LORE ENTRIES
+    match /lore_entries/{loreId} {
+      allow get: if isSignedIn() && isValidId(loreId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(loreId)
+        && isValidLoreEntry(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if isVerifiedUser()
+        && isValidId(loreId)
+        && isValidLoreEntry(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Edit Lore Chronicle
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'era', 'summary', 'content', 'updatedAt'])
+        )
+        && ownsProject(existing().projectId);
+      allow delete: if isVerifiedUser()
+        && isValidId(loreId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 6. TIMELINE EVENTS
+    match /timeline_events/{eventId} {
+      allow get: if isSignedIn() && isValidId(eventId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(eventId)
+        && isValidTimelineEvent(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if isVerifiedUser()
+        && isValidId(eventId)
+        && isValidTimelineEvent(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Edit Timeline Event
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'dateLabel', 'sortOrder', 'era', 'category', 'locationName', 'participants', 'description', 'updatedAt'])
+        )
+        && ownsProject(existing().projectId);
+      allow delete: if isVerifiedUser()
+        && isValidId(eventId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 7. NAMING RULES
+    match /naming_rules/{ruleId} {
+      allow get: if isSignedIn() && isValidId(ruleId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(ruleId)
+        && isValidNamingRule(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if isVerifiedUser()
+        && isValidId(ruleId)
+        && isValidNamingRule(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Edit Naming Rule or Toggle Active
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'cultureOrGroup', 'phoneticPattern', 'prefixSuffixRule', 'structureRule', 'examples', 'isActive', 'updatedAt'])
+        )
+        && ownsProject(existing().projectId);
+      allow delete: if isVerifiedUser()
+        && isValidId(ruleId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 8. AI GENERATIONS (Immutable Audit Log per Project)
+    match /ai_generations/{generationId} {
+      allow get: if isSignedIn() && isValidId(generationId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(generationId)
+        && isValidAiGeneration(incoming())
+        && incoming().createdAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if false;
+      allow delete: if isVerifiedUser()
+        && isValidId(generationId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 9. FAVORITES
+    match /favorites/{favoriteId} {
+      allow get: if isSignedIn() && isValidId(favoriteId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(favoriteId)
+        && isValidFavorite(incoming())
+        && incoming().createdAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if false;
+      allow delete: if isVerifiedUser()
+        && isValidId(favoriteId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+  }
+}
