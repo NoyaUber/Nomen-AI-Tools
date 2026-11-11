@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
+  Columns,
   Edit3,
   Flame,
+  History,
   Link2,
   Plus,
   Shield,
@@ -10,11 +12,16 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
+  AutosaveStatus,
   EntityRelation,
+  EntityVersion,
   ITEM_TYPES,
   ORGANIZATION_TYPES,
   POWER_CATEGORIES,
   Project,
+  ProjectAiSetting,
+  VersionedEntityType,
+  VisualAsset,
   WorldEntity,
 } from '../../types/nomen';
 import {
@@ -24,6 +31,7 @@ import {
   deleteEntityRelation,
   recordAiGeneration,
   updateEntity,
+  updateEntityRelation,
 } from '../../lib/db/firestore-service';
 import { generateEntityBlueprintApi } from '../../lib/ai/client';
 import {
@@ -36,11 +44,20 @@ import {
   Select,
   Textarea,
 } from '../../components/ui/primitives';
+import {
+  AiComparisonModal,
+  AutosaveIndicator,
+  VersionHistoryModal,
+} from '../../components/VersionHistoryModal';
+import { EntityVisualGallery } from '../../components/EntityVisualGallery';
 
 interface WorldStudiosViewProps {
   project: Project;
   entities: WorldEntity[];
   relations?: EntityRelation[];
+  versions?: EntityVersion[];
+  aiSettings?: ProjectAiSetting | null;
+  visualAssets?: VisualAsset[];
   onInspectEntityForAssistant?: (entity: WorldEntity) => void;
 }
 
@@ -48,6 +65,9 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
   project,
   entities,
   relations = [],
+  versions = [],
+  aiSettings = null,
+  visualAssets = [],
   onInspectEntityForAssistant,
 }) => {
   const [studioTab, setStudioTab] = useState<
@@ -102,17 +122,197 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
   const [masteryRequirements, setMasteryRequirements] = useState('');
   const [notablePractitioners, setNotablePractitioners] = useState('');
 
-  // Shared AI Assist, Link Modal & Delete
+  // Shared AI Assist, Comparison, Version History, Link Modal & Delete
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  const [comparisonCandidates, setComparisonCandidates] = useState<
+    Record<string, string>[]
+  >([]);
+  const [comparisonCategory, setComparisonCategory] = useState<
+    'organization' | 'item' | 'ability' | null
+  >(null);
+  const [versionTarget, setVersionTarget] = useState<WorldEntity | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<WorldEntity | null>(null);
+  const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>('idle');
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
 
   const [linkSourceEntity, setLinkSourceEntity] = useState<WorldEntity | null>(
     null
   );
+  const [editingRelId, setEditingRelId] = useState<string | null>(null);
   const [relTargetId, setRelTargetId] = useState('');
   const [relType, setRelType] = useState('Affiliated with');
   const [relDesc, setRelDesc] = useState('');
+  const [relCreateInverse, setRelCreateInverse] = useState(false);
+  const [relInverseType, setRelInverseType] = useState('Member of');
+  const [relError, setRelError] = useState<string | null>(null);
+
+  // Phase 7.2 — Reliable Debounced Autosave for Organizations, Artifacts & Power Systems
+  useEffect(() => {
+    if (!orgModalOpen || !editingOrgId || !orgName.trim()) return;
+    setAutosaveStatus('unsaved');
+    const timer = setTimeout(async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      setAutosaveStatus('saving');
+      try {
+        const category =
+          orgType === 'Noble Family' || orgType === 'Royal Dynasty'
+            ? 'family'
+            : 'organization';
+        const subtitle = [orgType, headquarters ? `Seat: ${headquarters}` : '']
+          .filter(Boolean)
+          .join(' · ');
+        await updateEntity(editingOrgId, {
+          category,
+          subCategory: orgType,
+          name: orgName,
+          subtitle,
+          summary: orgSummary || goals,
+          parentId: '',
+          attributes: {
+            founder,
+            leader,
+            headquarters,
+            members,
+            hierarchy,
+            history: orgHistory,
+            goals,
+            reputation,
+            symbols,
+            relations: orgRelations,
+          },
+          isAutosave: true,
+        });
+        setAutosaveStatus('saved');
+        setLastSavedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        );
+      } catch {
+        setAutosaveStatus('failed');
+      }
+    }, 2200);
+    return () => clearTimeout(timer);
+  }, [
+    orgModalOpen,
+    editingOrgId,
+    orgName,
+    orgType,
+    orgSummary,
+    founder,
+    leader,
+    headquarters,
+    members,
+    hierarchy,
+    orgHistory,
+    goals,
+    reputation,
+    symbols,
+    orgRelations,
+  ]);
+
+  useEffect(() => {
+    if (!itemModalOpen || !editingItemId || !itemName.trim()) return;
+    setAutosaveStatus('unsaved');
+    const timer = setTimeout(async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      setAutosaveStatus('saving');
+      try {
+        const subtitle = [
+          itemType,
+          rarity,
+          currentOwner ? `Owner: ${currentOwner}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        await updateEntity(editingItemId, {
+          category: 'item',
+          subCategory: itemType,
+          name: itemName,
+          subtitle,
+          summary: itemDescription,
+          parentId: '',
+          attributes: {
+            rarity,
+            origin,
+            powers,
+            limitations,
+            currentOwner,
+            history: itemHistory,
+          },
+          isAutosave: true,
+        });
+        setAutosaveStatus('saved');
+        setLastSavedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        );
+      } catch {
+        setAutosaveStatus('failed');
+      }
+    }, 2200);
+    return () => clearTimeout(timer);
+  }, [
+    itemModalOpen,
+    editingItemId,
+    itemName,
+    itemType,
+    rarity,
+    origin,
+    itemDescription,
+    powers,
+    limitations,
+    currentOwner,
+    itemHistory,
+  ]);
+
+  useEffect(() => {
+    if (!powerModalOpen || !editingPowerId || !powerName.trim()) return;
+    setAutosaveStatus('unsaved');
+    const timer = setTimeout(async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      setAutosaveStatus('saving');
+      try {
+        const subtitle = [powerCat, systemName].filter(Boolean).join(' · ');
+        await updateEntity(editingPowerId, {
+          category: 'ability',
+          subCategory: powerCat,
+          name: powerName,
+          subtitle,
+          summary: powerSummary,
+          parentId: '',
+          attributes: {
+            systemName,
+            sourceOfPower,
+            rankStructure,
+            costOrLimitation,
+            elementsOrBranches,
+            masteryRequirements,
+            notablePractitioners,
+          },
+          isAutosave: true,
+        });
+        setAutosaveStatus('saved');
+        setLastSavedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        );
+      } catch {
+        setAutosaveStatus('failed');
+      }
+    }, 2200);
+    return () => clearTimeout(timer);
+  }, [
+    powerModalOpen,
+    editingPowerId,
+    powerName,
+    powerCat,
+    powerSummary,
+    systemName,
+    sourceOfPower,
+    rankStructure,
+    costOrLimitation,
+    elementsOrBranches,
+    masteryRequirements,
+    notablePractitioners,
+  ]);
 
   const organizations = entities.filter(
     (e) => e.category === 'organization' || e.category === 'family'
@@ -354,9 +554,49 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
     setPowerModalOpen(false);
   };
 
+  const applyStudioCandidate = (
+    category: 'organization' | 'item' | 'ability',
+    r: Record<string, string>
+  ) => {
+    if (category === 'organization') {
+      setOrgName(r.name || orgName);
+      setOrgSummary(r.summary || orgSummary);
+      setFounder(r.founder || founder);
+      setLeader(r.leader || leader);
+      setHeadquarters(r.headquarters || headquarters);
+      setMembers(r.members || members);
+      setHierarchy(r.hierarchy || hierarchy);
+      setOrgHistory(r.history || orgHistory);
+      setGoals(r.goals || goals);
+      setReputation(r.reputation || reputation);
+      setSymbols(r.symbols || symbols);
+      setOrgRelations(r.relations || orgRelations);
+    } else if (category === 'item') {
+      setItemName(r.name || itemName);
+      setItemDescription(r.summary || itemDescription);
+      setRarity(r.rarity || rarity);
+      setOrigin(r.origin || origin);
+      setPowers(r.powers || powers);
+      setLimitations(r.limitations || limitations);
+      setCurrentOwner(r.currentOwner || currentOwner);
+      setItemHistory(r.history || itemHistory);
+    } else if (category === 'ability') {
+      setPowerName(r.name || powerName);
+      setPowerSummary(r.summary || powerSummary);
+      setSystemName(r.systemName || systemName);
+      setSourceOfPower(r.sourceOfPower || sourceOfPower);
+      setRankStructure(r.rankStructure || rankStructure);
+      setCostOrLimitation(r.costOrLimitation || costOrLimitation);
+      setElementsOrBranches(r.elementsOrBranches || elementsOrBranches);
+      setMasteryRequirements(r.masteryRequirements || masteryRequirements);
+      setNotablePractitioners(r.notablePractitioners || notablePractitioners);
+    }
+  };
+
   const handleAiAssist = async (
     category: 'organization' | 'item' | 'ability',
-    subCategory: string
+    subCategory: string,
+    count = 1
   ) => {
     if (!aiPrompt.trim()) return;
     setAiLoading(true);
@@ -365,46 +605,23 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
         category,
         subCategory,
         prompt: aiPrompt,
+        count,
         projectContext: {
           title: project.title,
           genre: project.genre,
           worldSettings: project.worldSettings,
+          customAiInstructions:
+            aiSettings?.isEnabled && aiSettings.customInstructions
+              ? aiSettings.customInstructions
+              : undefined,
         },
       });
-      const r = res.result;
 
-      if (category === 'organization') {
-        setOrgName(r.name || orgName);
-        setOrgSummary(r.summary || orgSummary);
-        setFounder(r.founder || founder);
-        setLeader(r.leader || leader);
-        setHeadquarters(r.headquarters || headquarters);
-        setMembers(r.members || members);
-        setHierarchy(r.hierarchy || hierarchy);
-        setOrgHistory(r.history || orgHistory);
-        setGoals(r.goals || goals);
-        setReputation(r.reputation || reputation);
-        setSymbols(r.symbols || symbols);
-        setOrgRelations(r.relations || orgRelations);
-      } else if (category === 'item') {
-        setItemName(r.name || itemName);
-        setItemDescription(r.summary || itemDescription);
-        setRarity(r.rarity || rarity);
-        setOrigin(r.origin || origin);
-        setPowers(r.powers || powers);
-        setLimitations(r.limitations || limitations);
-        setCurrentOwner(r.currentOwner || currentOwner);
-        setItemHistory(r.history || itemHistory);
-      } else if (category === 'ability') {
-        setPowerName(r.name || powerName);
-        setPowerSummary(r.summary || powerSummary);
-        setSystemName(r.systemName || systemName);
-        setSourceOfPower(r.sourceOfPower || sourceOfPower);
-        setRankStructure(r.rankStructure || rankStructure);
-        setCostOrLimitation(r.costOrLimitation || costOrLimitation);
-        setElementsOrBranches(r.elementsOrBranches || elementsOrBranches);
-        setMasteryRequirements(r.masteryRequirements || masteryRequirements);
-        setNotablePractitioners(r.notablePractitioners || notablePractitioners);
+      if (count > 1 && res.candidates && res.candidates.length > 1) {
+        setComparisonCandidates(res.candidates);
+        setComparisonCategory(category);
+      } else {
+        applyStudioCandidate(category, res.result);
       }
 
       await recordAiGeneration({
@@ -412,7 +629,7 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
         generationType: `${subCategory} Studio`,
         category: subCategory,
         promptSummary: aiPrompt,
-        resultsSummary: r.name || 'Generated Blueprint',
+        resultsSummary: res.result.name || 'Generated Blueprint',
         modelUsed: res.modelUsed,
       });
     } finally {
@@ -425,27 +642,80 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
     defaultRelationType: string
   ) => {
     const firstOther = entities.find((e) => e.id !== entity.id);
+    setEditingRelId(null);
     setLinkSourceEntity(entity);
     setRelTargetId(firstOther?.id || '');
     setRelType(defaultRelationType);
     setRelDesc('');
+    setRelCreateInverse(false);
+    setRelError(null);
   };
 
   const handleSaveRelation = async (e: React.FormEvent) => {
     e.preventDefault();
+    setRelError(null);
     if (!linkSourceEntity || !relTargetId) return;
     const target = entities.find((ent) => ent.id === relTargetId);
     if (!target) return;
 
-    await createEntityRelation({
-      projectId: project.id,
-      sourceEntityId: linkSourceEntity.id,
-      sourceEntityName: linkSourceEntity.name,
-      targetEntityId: target.id,
-      targetEntityName: target.name,
-      relationType: relType,
-      description: relDesc,
-    });
+    const normalizedType = relType.trim() || 'Connected To';
+
+    const duplicate = relations.some(
+      (r) =>
+        r.id !== editingRelId &&
+        r.sourceEntityId === linkSourceEntity.id &&
+        r.targetEntityId === target.id &&
+        r.relationType.toLowerCase() === normalizedType.toLowerCase()
+    );
+    if (duplicate) {
+      setRelError(
+        `A "${normalizedType}" link between ${linkSourceEntity.name} and ${target.name} already exists.`
+      );
+      return;
+    }
+
+    if (editingRelId) {
+      await updateEntityRelation(editingRelId, {
+        sourceEntityId: linkSourceEntity.id,
+        sourceEntityName: linkSourceEntity.name,
+        targetEntityId: target.id,
+        targetEntityName: target.name,
+        relationType: normalizedType,
+        description: relDesc,
+      });
+    } else {
+      await createEntityRelation({
+        projectId: project.id,
+        sourceEntityId: linkSourceEntity.id,
+        sourceEntityName: linkSourceEntity.name,
+        targetEntityId: target.id,
+        targetEntityName: target.name,
+        relationType: normalizedType,
+        description: relDesc,
+      });
+
+      if (relCreateInverse) {
+        const inv = relInverseType.trim() || normalizedType;
+        const invDup = relations.some(
+          (r) =>
+            r.sourceEntityId === target.id &&
+            r.targetEntityId === linkSourceEntity.id &&
+            r.relationType.toLowerCase() === inv.toLowerCase()
+        );
+        if (!invDup) {
+          await createEntityRelation({
+            projectId: project.id,
+            sourceEntityId: target.id,
+            sourceEntityName: target.name,
+            targetEntityId: linkSourceEntity.id,
+            targetEntityName: linkSourceEntity.name,
+            relationType: inv,
+            description: relDesc,
+          });
+        }
+      }
+    }
+    setEditingRelId(null);
     setLinkSourceEntity(null);
   };
 
@@ -456,34 +726,69 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
     if (entityRels.length === 0) return null;
 
     return (
-      <div className="pt-3 border-t border-[#1A2030] space-y-1.5">
-        <p className="text-[11px] font-semibold text-[#9D97B8]">
+      <div className="pt-3 border-t border-[var(--border-subtle)] space-y-1.5">
+        <p className="text-[11px] font-semibold text-[var(--text-secondary)]">
           Connected Canon Entities ({entityRels.length})
         </p>
         <div className="space-y-1">
-          {entityRels.map((rel) => (
-            <div
-              key={rel.id}
-              className="flex items-center justify-between gap-2 text-xs bg-[#0D1018] px-2.5 py-1.5 rounded border border-[#1E2436]"
-            >
-              <span className="text-[#D0CCE0] truncate">
-                <strong className="text-[#F3F1FA]">
-                  {rel.sourceEntityName}
-                </strong>{' '}
-                <span className="text-[#C4B5FD]">→ {rel.relationType} →</span>{' '}
-                <strong className="text-[#F3F1FA]">
-                  {rel.targetEntityName}
-                </strong>
-              </span>
-              <button
-                onClick={() => deleteEntityRelation(rel.id)}
-                className="text-[#736E8A] hover:text-[#F87171] cursor-pointer shrink-0"
-                title="Remove relationship"
+          {entityRels.map((rel) => {
+            const isOutgoing = rel.sourceEntityId === entity.id;
+            return (
+              <div
+                key={rel.id}
+                className="flex items-center justify-between gap-2 text-xs bg-[var(--bg-canvas)] px-2.5 py-1.5 rounded border border-[var(--border-subtle)]"
               >
-                <Trash2 className="w-3 h-3" />
-              </button>
-            </div>
-          ))}
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                  <span
+                    className={`text-[10px] font-mono-tabular uppercase px-1.5 py-0.5 rounded ${
+                      isOutgoing
+                        ? 'bg-[var(--bg-elevated)] text-[var(--accent-primary)]'
+                        : 'bg-[#132824] text-[#6EE7B7]'
+                    }`}
+                  >
+                    {isOutgoing ? 'Outgoing →' : '← Incoming'}
+                  </span>
+                  <span className="text-[var(--text-secondary)] truncate">
+                    <strong className="text-[var(--text-primary)]">
+                      {rel.sourceEntityName}
+                    </strong>{' '}
+                    <span className="text-[var(--accent-primary)]">
+                      → {rel.relationType} →
+                    </span>{' '}
+                    <strong className="text-[var(--text-primary)]">
+                      {rel.targetEntityName}
+                    </strong>
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {isOutgoing && (
+                    <button
+                      onClick={() => {
+                        setEditingRelId(rel.id);
+                        setLinkSourceEntity(entity);
+                        setRelTargetId(rel.targetEntityId);
+                        setRelType(rel.relationType);
+                        setRelDesc(rel.description);
+                        setRelCreateInverse(false);
+                        setRelError(null);
+                      }}
+                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                      title="Edit relationship"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => deleteEntityRelation(rel.id)}
+                    className="text-[var(--text-muted)] hover:text-[#F87171] cursor-pointer shrink-0"
+                    title="Remove relationship"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     );
@@ -494,21 +799,21 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
       {/* Header & Studio Tabs */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 className="text-2xl md:text-3xl font-semibold text-[#F3F1FA] font-serif-display">
+          <h1 className="text-2xl md:text-3xl font-semibold text-[var(--text-primary)] font-serif-display">
             Organizations, Artifacts & Power Systems
           </h1>
-          <p className="text-sm text-[#8E89A6] mt-0.5">
+          <p className="text-sm text-[var(--text-muted)] mt-0.5">
             Design noble dynasties, guilds, mythic relics, and custom magic or cultivation hierarchies.
           </p>
         </div>
 
-        <div className="flex items-center gap-1 p-1 bg-[#111520] border border-[#1E2436] rounded-lg self-start">
+        <div className="flex items-center gap-1 p-1 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg self-start">
           <button
             onClick={() => setStudioTab('organizations')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
               studioTab === 'organizations'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             <Shield className="w-3.5 h-3.5" />
@@ -518,8 +823,8 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
             onClick={() => setStudioTab('items')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
               studioTab === 'items'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             <Sword className="w-3.5 h-3.5" />
@@ -529,8 +834,8 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
             onClick={() => setStudioTab('powers')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
               studioTab === 'powers'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             <Flame className="w-3.5 h-3.5" />
@@ -540,7 +845,7 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
       </div>
 
       {/* Action Bar */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-[#111520] p-4 border border-[#1E2436] rounded-xl">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-[var(--bg-surface)] p-4 border border-[var(--border-subtle)] rounded-xl">
         <div className="flex-1 max-w-md">
           <Input
             placeholder={`Search ${studioTab}...`}
@@ -592,55 +897,63 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                 .map((org) => (
                   <div
                     key={org.id}
-                    className="p-6 bg-[#111520] border border-[#1E2436] rounded-xl space-y-4 flex flex-col justify-between"
+                    className="p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-4 flex flex-col justify-between"
                   >
                     <div className="space-y-3">
-                      <div className="flex items-center justify-between text-xs text-[#8E89A6]">
+                      <div className="flex items-center justify-between text-xs text-[var(--text-muted)]">
                         <span>{org.subCategory}</span>
                         {org.attributes?.headquarters && (
                           <span>HQ: {org.attributes.headquarters}</span>
                         )}
                       </div>
-                      <h2 className="text-2xl font-semibold text-[#F3F1FA] font-serif-display">
+                      <h2 className="text-2xl font-semibold text-[var(--text-primary)] font-serif-display">
                         {org.name}
                       </h2>
-                      <p className="text-xs text-[#D0CCE0] leading-relaxed">
+                      <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                         {org.summary}
                       </p>
 
-                      <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[#1A2030] text-xs">
+                      <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[var(--border-subtle)] text-xs">
                         <div>
-                          <span className="text-[#736E8A]">Founder:</span>{' '}
-                          <span className="text-[#E4E1EE]">
+                          <span className="text-[var(--text-muted)]">Founder:</span>{' '}
+                          <span className="text-[var(--text-primary)]">
                             {org.attributes?.founder || '—'}
                           </span>
                         </div>
                         <div>
-                          <span className="text-[#736E8A]">Current Leader:</span>{' '}
-                          <span className="text-[#E4E1EE]">
+                          <span className="text-[var(--text-muted)]">Current Leader:</span>{' '}
+                          <span className="text-[var(--text-primary)]">
                             {org.attributes?.leader || '—'}
                           </span>
                         </div>
                         <div className="col-span-2">
-                          <span className="text-[#736E8A]">Hierarchy:</span>{' '}
-                          <span className="text-[#C5C1D6]">
+                          <span className="text-[var(--text-muted)]">Hierarchy:</span>{' '}
+                          <span className="text-[var(--text-secondary)]">
                             {org.attributes?.hierarchy || '—'}
                           </span>
                         </div>
                         <div className="col-span-2">
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Symbols & Heraldry:
                           </span>{' '}
-                          <span className="text-[#C5C1D6]">
+                          <span className="text-[var(--text-secondary)]">
                             {org.attributes?.symbols || '—'}
                           </span>
                         </div>
                       </div>
 
+                      {/* Phase 11 — Organization Emblems, Flags & Crests */}
+                      <EntityVisualGallery
+                        project={project}
+                        entity={org}
+                        assets={visualAssets}
+                        defaultCategory="organization_emblem"
+                      />
+
                       {renderEntityRelations(org)}
                     </div>
 
-                    <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[#1A2030]">
+                    <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)]">
                       <Button
                         variant="ghost"
                         size="sm"
@@ -657,10 +970,18 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                           size="sm"
                           onClick={() => onInspectEntityForAssistant(org)}
                         >
-                          <Sparkles className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                          <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                           Ask AI
                         </Button>
                       )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setVersionTarget(org)}
+                      >
+                        <History className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                        History
+                      </Button>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -706,13 +1027,13 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                 .map((it) => (
                   <div
                     key={it.id}
-                    className="p-6 bg-[#111520] border border-[#1E2436] rounded-xl space-y-4 flex flex-col justify-between"
+                    className="p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-4 flex flex-col justify-between"
                   >
                     <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-xs text-[#8E89A6]">
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
                         <span>{it.subCategory}</span>
                         <span aria-hidden="true">·</span>
-                        <span className="text-[#C4B5FD]">
+                        <span className="text-[var(--accent-primary)]">
                           {it.attributes?.rarity || 'Artifact'}
                         </span>
                         {it.attributes?.currentOwner && (
@@ -722,44 +1043,56 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                           </>
                         )}
                       </div>
-                      <h2 className="text-2xl font-semibold text-[#F3F1FA] font-serif-display">
+                      <h2 className="text-2xl font-semibold text-[var(--text-primary)] font-serif-display">
                         {it.name}
                       </h2>
-                      <p className="text-xs text-[#D0CCE0] leading-relaxed">
+                      <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                         {it.summary}
                       </p>
 
-                      <div className="space-y-1.5 pt-3 border-t border-[#1A2030] text-xs">
+                      <div className="space-y-1.5 pt-3 border-t border-[var(--border-subtle)] text-xs">
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Powers & Effects:
                           </span>{' '}
-                          <span className="text-[#E4E1EE]">
+                          <span className="text-[var(--text-primary)]">
                             {it.attributes?.powers || '—'}
                           </span>
                         </p>
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Limitations & Toll:
                           </span>{' '}
-                          <span className="text-[#C5C1D6]">
+                          <span className="text-[var(--text-secondary)]">
                             {it.attributes?.limitations || '—'}
                           </span>
                         </p>
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Origin & Provenance:
                           </span>{' '}
-                          <span className="text-[#C5C1D6]">
+                          <span className="text-[var(--text-secondary)]">
                             {it.attributes?.origin || '—'}
                           </span>
                         </p>
                       </div>
 
+                      {/* Phase 11 — Item, Weapon & Artifact Visuals */}
+                      <EntityVisualGallery
+                        project={project}
+                        entity={it}
+                        assets={visualAssets}
+                        defaultCategory={
+                          it.subCategory === 'Armor' || it.subCategory === 'Equipment'
+                            ? 'armor_equipment'
+                            : 'weapon_artifact'
+                        }
+                      />
+
                       {renderEntityRelations(it)}
                     </div>
 
-                    <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[#1A2030]">
+                    <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)]">
                       <Button
                         variant="ghost"
                         size="sm"
@@ -776,10 +1109,18 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                           size="sm"
                           onClick={() => onInspectEntityForAssistant(it)}
                         >
-                          <Sparkles className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                          <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                           Ask AI
                         </Button>
                       )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setVersionTarget(it)}
+                      >
+                        <History className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                        History
+                      </Button>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -825,10 +1166,10 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                 .map((pw) => (
                   <div
                     key={pw.id}
-                    className="p-6 bg-[#111520] border border-[#1E2436] rounded-xl space-y-4 flex flex-col justify-between"
+                    className="p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-4 flex flex-col justify-between"
                   >
                     <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-xs text-[#8E89A6]">
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
                         <span>{pw.subCategory}</span>
                         {pw.attributes?.systemName && (
                           <>
@@ -837,73 +1178,81 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                           </>
                         )}
                       </div>
-                      <h2 className="text-2xl font-semibold text-[#F3F1FA] font-serif-display">
+                      <h2 className="text-2xl font-semibold text-[var(--text-primary)] font-serif-display">
                         {pw.name}
                       </h2>
-                      <p className="text-xs text-[#D0CCE0] leading-relaxed">
+                      <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                         {pw.summary}
                       </p>
 
-                      <div className="space-y-1.5 pt-3 border-t border-[#1A2030] text-xs">
+                      <div className="space-y-1.5 pt-3 border-t border-[var(--border-subtle)] text-xs">
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Source of Power:
                           </span>{' '}
-                          <span className="text-[#E4E1EE]">
+                          <span className="text-[var(--text-primary)]">
                             {pw.attributes?.sourceOfPower || '—'}
                           </span>
                         </p>
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Custom Rank / Tier Structure:
                           </span>{' '}
-                          <span className="text-[#C4B5FD]">
+                          <span className="text-[var(--accent-primary)]">
                             {pw.attributes?.rankStructure ||
                               'Unranked / Bespoke'}
                           </span>
                         </p>
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Branches / Elements:
                           </span>{' '}
-                          <span className="text-[#C5C1D6]">
+                          <span className="text-[var(--text-secondary)]">
                             {pw.attributes?.elementsOrBranches || '—'}
                           </span>
                         </p>
                         <p>
-                          <span className="text-[#736E8A]">
+                          <span className="text-[var(--text-muted)]">
                             Cost & Hard Limitations:
                           </span>{' '}
-                          <span className="text-[#C5C1D6]">
+                          <span className="text-[var(--text-secondary)]">
                             {pw.attributes?.costOrLimitation || '—'}
                           </span>
                         </p>
                         {pw.attributes?.masteryRequirements && (
                           <p>
-                            <span className="text-[#736E8A]">
+                            <span className="text-[var(--text-muted)]">
                               Mastery Requirements:
                             </span>{' '}
-                            <span className="text-[#C5C1D6]">
+                            <span className="text-[var(--text-secondary)]">
                               {pw.attributes.masteryRequirements}
                             </span>
                           </p>
                         )}
                         {pw.attributes?.notablePractitioners && (
                           <p>
-                            <span className="text-[#736E8A]">
+                            <span className="text-[var(--text-muted)]">
                               Notable Practitioners:
                             </span>{' '}
-                            <span className="text-[#E4E1EE]">
+                            <span className="text-[var(--text-primary)]">
                               {pw.attributes.notablePractitioners}
                             </span>
                           </p>
                         )}
                       </div>
 
+                      {/* Phase 11 — Power System & Magic Ability Illustrations */}
+                      <EntityVisualGallery
+                        project={project}
+                        entity={pw}
+                        assets={visualAssets}
+                        defaultCategory="power_system_illustration"
+                      />
+
                       {renderEntityRelations(pw)}
                     </div>
 
-                    <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[#1A2030]">
+                    <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)]">
                       <Button
                         variant="ghost"
                         size="sm"
@@ -920,10 +1269,18 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
                           size="sm"
                           onClick={() => onInspectEntityForAssistant(pw)}
                         >
-                          <Sparkles className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                          <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                           Ask AI
                         </Button>
                       )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setVersionTarget(pw)}
+                      >
+                        <History className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                        History
+                      </Button>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -960,27 +1317,38 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
         maxWidth="max-w-3xl"
       >
         <form onSubmit={handleSaveOrg} className="space-y-4">
-          <div className="p-3 bg-[#0D1018] border border-[#23293B] rounded-lg flex flex-col sm:flex-row gap-2">
+          <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg flex flex-col sm:flex-row gap-2">
             <Input
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
               placeholder="AI Architect: e.g., 'A guild of blind astrological cartographers'..."
             />
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => handleAiAssist('organization', orgType)}
-              disabled={aiLoading}
-            >
-              {aiLoading ? 'Drafting...' : 'Draft with AI'}
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => handleAiAssist('organization', orgType, 1)}
+                disabled={aiLoading}
+              >
+                {aiLoading ? 'Drafting...' : 'Draft with AI'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleAiAssist('organization', orgType, 3)}
+                disabled={aiLoading}
+              >
+                <Columns className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                Compare 3
+              </Button>
+            </div>
           </div>
 
           {(characters.length > 0 || locations.length > 0) && (
-            <div className="p-3 bg-[#0D1018] border border-[#1E2436] rounded-lg grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg grid grid-cols-1 sm:grid-cols-2 gap-3">
               {characters.length > 0 && (
                 <div>
-                  <label className="block text-[11px] text-[#9D97B8] mb-1">
+                  <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
                     Quick-Fill Leader from Character Studio
                   </label>
                   <Select
@@ -1000,7 +1368,7 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
               )}
               {locations.length > 0 && (
                 <div>
-                  <label className="block text-[11px] text-[#9D97B8] mb-1">
+                  <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
                     Quick-Fill Headquarters from World Builder
                   </label>
                   <Select
@@ -1131,17 +1499,27 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
             </div>
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-[#1E2436]">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => setOrgModalOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary">
-              Save Organization
-            </Button>
+          <div className="flex items-center justify-between gap-3 pt-4 border-t border-[var(--border-subtle)]">
+            <div>
+              {editingOrgId && (
+                <AutosaveIndicator
+                  status={autosaveStatus}
+                  lastSavedAt={lastSavedAt}
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setOrgModalOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary">
+                Save Organization
+              </Button>
+            </div>
           </div>
         </form>
       </Modal>
@@ -1156,25 +1534,36 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
         maxWidth="max-w-2xl"
       >
         <form onSubmit={handleSaveItem} className="space-y-4">
-          <div className="p-3 bg-[#0D1018] border border-[#23293B] rounded-lg flex flex-col sm:flex-row gap-2">
+          <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg flex flex-col sm:flex-row gap-2">
             <Input
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
               placeholder="AI Architect: e.g., 'A star-iron blade that drinks spoken oaths'..."
             />
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => handleAiAssist('item', itemType)}
-              disabled={aiLoading}
-            >
-              {aiLoading ? 'Drafting...' : 'Draft with AI'}
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => handleAiAssist('item', itemType, 1)}
+                disabled={aiLoading}
+              >
+                {aiLoading ? 'Drafting...' : 'Draft with AI'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleAiAssist('item', itemType, 3)}
+                disabled={aiLoading}
+              >
+                <Columns className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                Compare 3
+              </Button>
+            </div>
           </div>
 
           {characters.length > 0 && (
-            <div className="p-3 bg-[#0D1018] border border-[#1E2436] rounded-lg">
-              <label className="block text-[11px] text-[#9D97B8] mb-1">
+            <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg">
+              <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
                 Quick-Fill Current Wielder / Owner from Character Studio
               </label>
               <Select
@@ -1278,17 +1667,27 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
             />
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-[#1E2436]">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => setItemModalOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary">
-              Save Artifact
-            </Button>
+          <div className="flex items-center justify-between gap-3 pt-4 border-t border-[var(--border-subtle)]">
+            <div>
+              {editingItemId && (
+                <AutosaveIndicator
+                  status={autosaveStatus}
+                  lastSavedAt={lastSavedAt}
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setItemModalOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary">
+                Save Artifact
+              </Button>
+            </div>
           </div>
         </form>
       </Modal>
@@ -1306,20 +1705,31 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
         maxWidth="max-w-2xl"
       >
         <form onSubmit={handleSavePower} className="space-y-4">
-          <div className="p-3 bg-[#0D1018] border border-[#23293B] rounded-lg flex flex-col sm:flex-row gap-2">
+          <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg flex flex-col sm:flex-row gap-2">
             <Input
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
               placeholder="AI Architect: e.g., 'Acoustic star-metal magic divided into five harmonic chords'..."
             />
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => handleAiAssist('ability', powerCat)}
-              disabled={aiLoading}
-            >
-              {aiLoading ? 'Drafting...' : 'Draft with AI'}
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => handleAiAssist('ability', powerCat, 1)}
+                disabled={aiLoading}
+              >
+                {aiLoading ? 'Drafting...' : 'Draft with AI'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleAiAssist('ability', powerCat, 3)}
+                disabled={aiLoading}
+              >
+                <Columns className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                Compare 3
+              </Button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1421,17 +1831,27 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
             </div>
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-[#1E2436]">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => setPowerModalOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary">
-              Save Power Entry
-            </Button>
+          <div className="flex items-center justify-between gap-3 pt-4 border-t border-[var(--border-subtle)]">
+            <div>
+              {editingPowerId && (
+                <AutosaveIndicator
+                  status={autosaveStatus}
+                  lastSavedAt={lastSavedAt}
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setPowerModalOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary">
+                Save Power Entry
+              </Button>
+            </div>
           </div>
         </form>
       </Modal>
@@ -1440,11 +1860,20 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
       <Modal
         open={Boolean(linkSourceEntity)}
         onClose={() => setLinkSourceEntity(null)}
-        title={`Link ${linkSourceEntity?.name || 'Entity'} to Canon`}
+        title={
+          editingRelId
+            ? `Edit Relationship for ${linkSourceEntity?.name || 'Entity'}`
+            : `Link ${linkSourceEntity?.name || 'Entity'} to Canon`
+        }
         subtitle="Connect this organization, artifact, or power system to a character, location, or faction."
         maxWidth="max-w-md"
       >
         <form onSubmit={handleSaveRelation} className="space-y-4">
+          {relError && (
+            <div className="p-2.5 bg-[#3A1820] border border-[#7F1D1D] rounded-lg text-xs text-[#FCA5A5]">
+              {relError}
+            </div>
+          )}
           <div>
             <FieldLabel label="Target Entity in Project" required />
             <Select
@@ -1480,7 +1909,29 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
               placeholder="Optional note on this relationship..."
             />
           </div>
-          <div className="flex justify-end gap-2 pt-3 border-t border-[#1E2436]">
+          {!editingRelId && (
+            <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg space-y-2">
+              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={relCreateInverse}
+                  onChange={(e) => setRelCreateInverse(e.target.checked)}
+                />
+                <span>Also create inverse relationship (Target → Source)</span>
+              </label>
+              {relCreateInverse && (
+                <div>
+                  <FieldLabel label="Inverse Relationship Type" />
+                  <Input
+                    value={relInverseType}
+                    onChange={(e) => setRelInverseType(e.target.value)}
+                    placeholder="e.g., Wields, Leads, Seat of..."
+                  />
+                </div>
+              )}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-3 border-t border-[var(--border-subtle)]">
             <Button
               type="button"
               variant="ghost"
@@ -1489,11 +1940,58 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
               Cancel
             </Button>
             <Button type="submit" variant="primary">
-              Create Relationship
+              {editingRelId ? 'Update Relationship' : 'Create Relationship'}
             </Button>
           </div>
         </form>
       </Modal>
+
+      {/* AI Comparison Modal (Phase 8.3) */}
+      <AiComparisonModal
+        open={Boolean(comparisonCategory)}
+        onClose={() => setComparisonCategory(null)}
+        title="Compare AI Worldbuilding Variations"
+        candidates={comparisonCandidates}
+        primaryTitleKey="name"
+        secondaryKey="leader"
+        summaryKey="summary"
+        displayFields={[
+          { key: 'goals', label: 'Goals' },
+          { key: 'powers', label: 'Powers' },
+          { key: 'rankStructure', label: 'Rank Structure' },
+          { key: 'history', label: 'History' },
+        ]}
+        onSelectCandidate={(c) => {
+          if (comparisonCategory) {
+            applyStudioCandidate(comparisonCategory, c);
+          }
+        }}
+      />
+
+      {/* Version History Modal (Phase 7.1) */}
+      {versionTarget && (
+        <VersionHistoryModal
+          open={Boolean(versionTarget)}
+          onClose={() => setVersionTarget(null)}
+          projectId={project.id}
+          entityId={versionTarget.id}
+          entityType={
+            (versionTarget.category === 'family'
+              ? 'organization'
+              : versionTarget.category) as VersionedEntityType
+          }
+          entityName={versionTarget.name}
+          currentSnapshot={{
+            name: versionTarget.name,
+            category: versionTarget.category,
+            subCategory: versionTarget.subCategory,
+            subtitle: versionTarget.subtitle,
+            summary: versionTarget.summary,
+            ...versionTarget.attributes,
+          }}
+          versions={versions}
+        />
+      )}
 
       <ConfirmDeleteModal
         open={Boolean(deleteTarget)}
@@ -1503,8 +2001,8 @@ export const WorldStudiosView: React.FC<WorldStudiosViewProps> = ({
           await deleteEntity(deleteTarget.id);
           setDeleteTarget(null);
         }}
-        title="Delete Entry"
-        description={`Are you sure you want to delete "${deleteTarget?.name}"?`}
+        title="Move Entry to Trash"
+        description={`Move "${deleteTarget?.name}" to Trash? You can restore it anytime from the Encyclopedia Vault.`}
       />
     </div>
   );

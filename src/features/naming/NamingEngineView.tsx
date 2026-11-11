@@ -24,6 +24,8 @@ import {
   NamingCategory,
   NamingRule,
   Project,
+  ProjectAiSetting,
+  WorldEntity,
 } from '../../types/nomen';
 import {
   createEntity,
@@ -54,6 +56,8 @@ interface NamingEngineViewProps {
   namingRules: NamingRule[];
   favorites: FavoriteItem[];
   aiGenerations: AiGenerationRecord[];
+  entities?: WorldEntity[];
+  aiSettings?: ProjectAiSetting | null;
 }
 
 export function mapNamingCategoryToEntityCategory(cat: NamingCategory): {
@@ -190,6 +194,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
   namingRules,
   favorites,
   aiGenerations,
+  entities = [],
+  aiSettings = null,
 }) => {
   const [subTab, setSubTab] = useState<'generator' | 'rules' | 'favorites' | 'history'>('generator');
   const [selectedCategory, setSelectedCategory] = useState<NamingCategory>('Character names');
@@ -358,6 +364,35 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
           examples: r.examples,
         }));
 
+      // Phase 8.1 — Smart Context: Include matching family/location canon notes if referenced
+      const canonReferences: string[] = [];
+      if (existingFamilyName.trim()) {
+        const matchedFam = entities.find(
+          (ent) =>
+            ent.name.toLowerCase().includes(existingFamilyName.toLowerCase()) ||
+            ent.attributes?.lastName?.toLowerCase() ===
+              existingFamilyName.toLowerCase()
+        );
+        if (matchedFam) {
+          canonReferences.push(
+            `Existing Canon Family/Member "${matchedFam.name}": ${matchedFam.summary}`
+          );
+        }
+      }
+      if (origin.trim()) {
+        const matchedLoc = entities.find((ent) =>
+          ent.name.toLowerCase().includes(origin.toLowerCase())
+        );
+        if (matchedLoc) {
+          canonReferences.push(
+            `Origin Location "${matchedLoc.name}" (${matchedLoc.subCategory}): ${matchedLoc.summary}`
+          );
+        }
+      }
+      if (canonReferences.length > 0) {
+        parameters['Smart Canon Context'] = canonReferences.join(' | ');
+      }
+
       const res = await generateNamesApi({
         category: selectedCategory,
         count: candidateCount,
@@ -366,6 +401,10 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
           genre: project.genre,
           worldSettings: project.worldSettings,
           language: project.language,
+          customAiInstructions:
+            aiSettings?.isEnabled && aiSettings.customInstructions
+              ? aiSettings.customInstructions
+              : undefined,
         },
         parameters,
         activeRules,
@@ -571,21 +610,21 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
       {/* Header & Sub-Navigation */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 className="text-2xl md:text-3xl font-semibold text-[#F3F1FA] font-serif-display">
+          <h1 className="text-2xl md:text-3xl font-semibold text-[var(--text-primary)] font-serif-display">
             Contextual Naming Engine & Philology Studio
           </h1>
-          <p className="text-sm text-[#8E89A6] mt-0.5">
+          <p className="text-sm text-[var(--text-muted)] mt-0.5">
             Synthesize culturally grounded names across 15 worldbuilding categories with custom phonetic rules.
           </p>
         </div>
 
-        <div className="flex items-center gap-1 p-1 bg-[#111520] border border-[#1E2436] rounded-lg self-start">
+        <div className="flex items-center gap-1 p-1 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg self-start">
           <button
             onClick={() => setSubTab('generator')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
               subTab === 'generator'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             Naming Studio
@@ -594,8 +633,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             onClick={() => setSubTab('rules')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
               subTab === 'rules'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             Naming Rules ({namingRules.filter((r) => r.isActive).length} Active)
@@ -604,8 +643,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             onClick={() => setSubTab('favorites')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
               subTab === 'favorites'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             Favorites ({favorites.length})
@@ -614,8 +653,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             onClick={() => setSubTab('history')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
               subTab === 'history'
-                ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                : 'text-[#8E89A6] hover:text-[#ECEAF2]'
+                ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
           >
             History ({aiGenerations.length})
@@ -624,7 +663,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
       </div>
 
       {feedbackMsg && (
-        <div className="px-4 py-2.5 text-xs text-[#E4E1EE] bg-[#1D2336] border border-[#8B7EC8]/50 rounded-lg flex items-center justify-between">
+        <div className="px-4 py-2.5 text-xs text-[var(--text-primary)] bg-[var(--bg-elevated)] border border-[var(--accent-primary)]/50 rounded-lg flex items-center justify-between">
           <span>{feedbackMsg}</span>
         </div>
       )}
@@ -633,10 +672,10 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
       {subTab === 'generator' && (
         <div className="space-y-5">
           {/* 15-Category Quick Matrix */}
-          <div className="p-4 bg-[#111520] border border-[#1E2436] rounded-xl space-y-2.5">
-            <div className="flex items-center justify-between text-xs text-[#8E89A6]">
+          <div className="p-4 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-2.5">
+            <div className="flex items-center justify-between text-xs text-[var(--text-muted)]">
               <span>Select Naming Category (All 15 Supported Categories)</span>
-              <span className="font-mono-tabular text-[#C4B5FD]">{selectedCategory}</span>
+              <span className="font-mono-tabular text-[var(--accent-primary)]">{selectedCategory}</span>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {NAMING_CATEGORIES.map((cat) => {
@@ -648,8 +687,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                     onClick={() => handleSelectCategory(cat)}
                     className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
                       active
-                        ? 'bg-[#7C6CC4] text-[#F8F7FC]'
-                        : 'bg-[#0D1018] text-[#9D97B8] hover:text-[#ECEAF2] hover:bg-[#171C2B] border border-[#1E2436]'
+                        ? 'bg-[var(--accent-primary)] text-[#F8F7FC]'
+                        : 'bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] border border-[var(--border-subtle)]'
                     }`}
                   >
                     {cat}
@@ -663,7 +702,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             {/* Left 5 Cols: Dynamic Category & Contextual Form */}
             <form
               onSubmit={handleGenerate}
-              className="lg:col-span-5 p-6 bg-[#111520] border border-[#1E2436] rounded-xl space-y-4"
+              className="lg:col-span-5 p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-4"
             >
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="sm:col-span-2">
@@ -705,7 +744,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
 
               {/* Dynamic Inputs for Character / Surname / Family / Title Categories */}
               {isCharacterCategory && (
-                <div className="space-y-3 pt-2 border-t border-[#1A2030]">
+                <div className="space-y-3 pt-2 border-t border-[var(--border-subtle)]">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <FieldLabel label="Gender / Presentation" />
@@ -805,7 +844,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
 
               {/* Dynamic Inputs for Location Categories */}
               {isLocationCategory && (
-                <div className="space-y-3 pt-2 border-t border-[#1A2030]">
+                <div className="space-y-3 pt-2 border-t border-[var(--border-subtle)]">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <FieldLabel label="Specific Location Type" />
@@ -875,7 +914,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
 
               {/* Dynamic Inputs for Organization / Item / Magic / Ability */}
               {!isCharacterCategory && !isLocationCategory && (
-                <div className="space-y-3 pt-2 border-t border-[#1A2030]">
+                <div className="space-y-3 pt-2 border-t border-[var(--border-subtle)]">
                   <div>
                     <FieldLabel label="Domain, Essence, or Function" />
                     <Input
@@ -924,8 +963,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
               </div>
 
               {namingRules.filter((r) => r.isActive).length > 0 && (
-                <div className="p-3 bg-[#0D1018] border border-[#23293B] rounded-lg text-xs text-[#A39EBA]">
-                  <span className="text-[#C4B5FD] font-medium">
+                <div className="p-3 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg text-xs text-[var(--text-secondary)]">
+                  <span className="text-[var(--accent-primary)] font-medium">
                     {namingRules.filter((r) => r.isActive).length} Project Naming Rule(s) Active:
                   </span>{' '}
                   {namingRules
@@ -946,11 +985,11 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             {/* Right 7 Cols: Candidates Workspace */}
             <div className="lg:col-span-7 space-y-4">
               {/* Etymology Honesty Banner */}
-              <div className="p-4 bg-[#111520] border border-[#1E2436] rounded-xl flex items-start justify-between gap-4">
-                <div className="flex items-start gap-3 text-xs text-[#A39EBA] leading-relaxed">
-                  <Info className="w-4 h-4 text-[#C4B5FD] shrink-0 mt-0.5" />
+              <div className="p-4 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3 text-xs text-[var(--text-secondary)] leading-relaxed">
+                  <Info className="w-4 h-4 text-[var(--accent-primary)] shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-semibold text-[#E4E1EE]">
+                    <span className="font-semibold text-[var(--text-primary)]">
                       Philological & Etymological Note:
                     </span>{' '}
                     {etymologyNote ||
@@ -964,7 +1003,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                     size="sm"
                     onClick={() => setCompareModalOpen(true)}
                   >
-                    <Columns className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                    <Columns className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                     Compare ({compareIds.length})
                   </Button>
                 )}
@@ -986,7 +1025,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-xs text-[#8E89A6] font-mono-tabular">
+                    <div className="flex items-center gap-2 text-xs text-[var(--text-muted)] font-mono-tabular">
                       <span>
                         Showing {candidates.length} candidates for {selectedCategory}
                       </span>
@@ -1015,8 +1054,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                     return (
                       <div
                         key={cand.id}
-                        className={`p-5 bg-[#111520] border rounded-xl transition-colors space-y-4 ${
-                          isCompared ? 'border-[#8B7EC8]' : 'border-[#1E2436]'
+                        className={`p-5 bg-[var(--bg-surface)] border rounded-xl transition-colors space-y-4 ${
+                          isCompared ? 'border-[var(--accent-primary)]' : 'border-[var(--border-subtle)]'
                         }`}
                       >
                         {isEditing ? (
@@ -1084,18 +1123,18 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                           </div>
                         ) : (
                           <>
-                            <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 border-b border-[#1A2030] pb-3">
+                            <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 border-b border-[var(--border-subtle)] pb-3">
                               <div>
                                 <div className="flex items-baseline gap-3 flex-wrap">
-                                  <h3 className="text-2xl font-semibold text-[#F3F1FA] font-serif-display">
+                                  <h3 className="text-2xl font-semibold text-[var(--text-primary)] font-serif-display">
                                     {cand.name}
                                   </h3>
-                                  <span className="text-xs font-mono-tabular text-[#C4B5FD]">
+                                  <span className="text-xs font-mono-tabular text-[var(--accent-primary)]">
                                     /{cand.pronunciation}/
                                   </span>
                                 </div>
                                 {cand.titleOrVariation && (
-                                  <p className="text-xs text-[#9D97B8] mt-1">
+                                  <p className="text-xs text-[var(--text-secondary)] mt-1">
                                     Epithet / Variations: {cand.titleOrVariation}
                                   </p>
                                 )}
@@ -1121,7 +1160,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                                   onClick={() => handleFavorite(cand)}
                                   title="Favorite Candidate"
                                 >
-                                  <Star className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                                  <Star className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                                   Favorite
                                 </Button>
                                 <Button
@@ -1138,33 +1177,33 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
 
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs leading-relaxed">
                               <div>
-                                <p className="text-[#736E8A] font-medium mb-1">
+                                <p className="text-[var(--text-muted)] font-medium mb-1">
                                   In-Universe Interpretation
                                 </p>
-                                <p className="text-[#D0CCE0]">{cand.interpretation}</p>
+                                <p className="text-[var(--text-secondary)]">{cand.interpretation}</p>
                               </div>
                               <div>
-                                <p className="text-[#736E8A] font-medium mb-1">
+                                <p className="text-[var(--text-muted)] font-medium mb-1">
                                   Linguistic / Cultural Inspiration
                                 </p>
-                                <p className="text-[#D0CCE0]">{cand.inspiration}</p>
+                                <p className="text-[var(--text-secondary)]">{cand.inspiration}</p>
                               </div>
                               <div>
-                                <p className="text-[#736E8A] font-medium mb-1">
+                                <p className="text-[var(--text-muted)] font-medium mb-1">
                                   Contextual Suitability
                                 </p>
-                                <p className="text-[#D0CCE0]">{cand.suitability}</p>
+                                <p className="text-[var(--text-secondary)]">{cand.suitability}</p>
                               </div>
                             </div>
 
-                            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-[#1A2030]">
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-[var(--border-subtle)]">
                               <div className="flex flex-wrap items-center gap-2">
                                 <Button
                                   variant="secondary"
                                   size="sm"
                                   onClick={() => openSaveEntityModal(cand)}
                                 >
-                                  <BookmarkPlus className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                                  <BookmarkPlus className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                                   Save into Project Entities
                                 </Button>
                                 <Button
@@ -1185,8 +1224,8 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                                 onClick={() => toggleCompare(cand.id)}
                                 className={`text-xs px-2.5 py-1 rounded border transition-colors cursor-pointer ${
                                   isCompared
-                                    ? 'bg-[#1D2336] border-[#8B7EC8] text-[#EDE9FE]'
-                                    : 'border-[#23293B] text-[#8E89A6] hover:text-[#ECEAF2]'
+                                    ? 'bg-[var(--bg-elevated)] border-[var(--accent-primary)] text-[#EDE9FE]'
+                                    : 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                                 }`}
                               >
                                 {isCompared ? 'Selected for Comparison' : 'Select to Compare'}
@@ -1207,12 +1246,12 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
       {/* SUBTAB 2: NAMING RULES */}
       {subTab === 'rules' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between bg-[#111520] p-5 border border-[#1E2436] rounded-xl">
+          <div className="flex items-center justify-between bg-[var(--bg-surface)] p-5 border border-[var(--border-subtle)] rounded-xl">
             <div>
-              <h2 className="text-lg font-semibold text-[#F3F1FA] font-serif-display">
+              <h2 className="text-lg font-semibold text-[var(--text-primary)] font-serif-display">
                 Custom Naming Rules & Linguistic Conventions
               </h2>
-              <p className="text-xs text-[#8E89A6] mt-0.5">
+              <p className="text-xs text-[var(--text-muted)] mt-0.5">
                 Active conventions are automatically injected into the Naming Engine and Character Architect.
               </p>
             </div>
@@ -1234,13 +1273,13 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
               {namingRules.map((rule) => (
                 <div
                   key={rule.id}
-                  className={`p-5 bg-[#111520] border rounded-xl space-y-3 ${
-                    rule.isActive ? 'border-[#8B7EC8]/60' : 'border-[#1E2436] opacity-75'
+                  className={`p-5 bg-[var(--bg-surface)] border rounded-xl space-y-3 ${
+                    rule.isActive ? 'border-[var(--accent-primary)]/60' : 'border-[var(--border-subtle)] opacity-75'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="flex items-center gap-2 text-xs text-[#8E89A6]">
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
                         <span>{rule.category}</span>
                         {rule.cultureOrGroup && (
                           <>
@@ -1249,7 +1288,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                           </>
                         )}
                       </div>
-                      <h3 className="text-lg font-semibold text-[#F3F1FA] font-serif-display mt-0.5">
+                      <h3 className="text-lg font-semibold text-[var(--text-primary)] font-serif-display mt-0.5">
                         {rule.title}
                       </h3>
                     </div>
@@ -1258,40 +1297,40 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                       onClick={() => handleToggleRuleActive(rule)}
                       className={`px-2.5 py-1 text-xs rounded border cursor-pointer ${
                         rule.isActive
-                          ? 'bg-[#1D2336] border-[#8B7EC8] text-[#EDE9FE]'
-                          : 'bg-[#0B0D13] border-[#23293B] text-[#736E8A]'
+                          ? 'bg-[var(--bg-elevated)] border-[var(--accent-primary)] text-[#EDE9FE]'
+                          : 'bg-[var(--bg-canvas)] border-[var(--border-subtle)] text-[var(--text-muted)]'
                       }`}
                     >
                       {rule.isActive ? 'Active in AI' : 'Inactive'}
                     </button>
                   </div>
 
-                  <div className="space-y-1.5 text-xs text-[#A39EBA]">
+                  <div className="space-y-1.5 text-xs text-[var(--text-secondary)]">
                     {rule.phoneticPattern && (
                       <p>
-                        <span className="text-[#736E8A]">Phonetics:</span> {rule.phoneticPattern}
+                        <span className="text-[var(--text-muted)]">Phonetics:</span> {rule.phoneticPattern}
                       </p>
                     )}
                     {rule.prefixSuffixRule && (
                       <p>
-                        <span className="text-[#736E8A]">Prefixes / Suffixes:</span>{' '}
+                        <span className="text-[var(--text-muted)]">Prefixes / Suffixes:</span>{' '}
                         {rule.prefixSuffixRule}
                       </p>
                     )}
                     {rule.structureRule && (
                       <p>
-                        <span className="text-[#736E8A]">Structure:</span> {rule.structureRule}
+                        <span className="text-[var(--text-muted)]">Structure:</span> {rule.structureRule}
                       </p>
                     )}
                     {rule.examples && (
                       <p>
-                        <span className="text-[#736E8A]">Canonical Examples:</span>{' '}
-                        <span className="text-[#E4E1EE]">{rule.examples}</span>
+                        <span className="text-[var(--text-muted)]">Canonical Examples:</span>{' '}
+                        <span className="text-[var(--text-primary)]">{rule.examples}</span>
                       </p>
                     )}
                   </div>
 
-                  <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#1A2030]">
+                  <div className="flex items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)]">
                     <Button variant="ghost" size="sm" onClick={() => openEditRuleModal(rule)}>
                       <Edit3 className="w-3.5 h-3.5" />
                       Edit
@@ -1327,17 +1366,17 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
               {favorites.map((fav) => (
                 <div
                   key={fav.id}
-                  className="p-5 bg-[#111520] border border-[#1E2436] rounded-xl space-y-2"
+                  className="p-5 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-2"
                 >
                   <div className="flex items-baseline justify-between gap-2">
-                    <h3 className="text-xl font-semibold text-[#F3F1FA] font-serif-display">
+                    <h3 className="text-xl font-semibold text-[var(--text-primary)] font-serif-display">
                       {fav.name}
                     </h3>
-                    <span className="text-xs font-mono-tabular text-[#C4B5FD]">
+                    <span className="text-xs font-mono-tabular text-[var(--accent-primary)]">
                       /{fav.pronunciation}/
                     </span>
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-[#8E89A6]">
+                  <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
                     <span>{fav.category}</span>
                     {fav.titleOrVariation && (
                       <>
@@ -1346,9 +1385,9 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                       </>
                     )}
                   </div>
-                  <p className="text-xs text-[#D0CCE0] leading-relaxed">{fav.interpretation}</p>
-                  <p className="text-xs text-[#8E89A6] leading-relaxed">{fav.inspiration}</p>
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#1A2030]">
+                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{fav.interpretation}</p>
+                  <p className="text-xs text-[var(--text-muted)] leading-relaxed">{fav.inspiration}</p>
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
                     <Button
                       variant="secondary"
                       size="sm"
@@ -1367,7 +1406,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
                         )
                       }
                     >
-                      <BookmarkPlus className="w-3.5 h-3.5 text-[#C4B5FD]" />
+                      <BookmarkPlus className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                       Save as Entity
                     </Button>
                     <Button
@@ -1407,19 +1446,19 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             aiGenerations.map((gen) => (
               <div
                 key={gen.id}
-                className="p-4 bg-[#111520] border border-[#1E2436] rounded-xl flex items-start justify-between gap-4"
+                className="p-4 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl flex items-start justify-between gap-4"
               >
                 <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-xs text-[#8E89A6]">
-                    <History className="w-3.5 h-3.5 text-[#8B7EC8]" />
+                  <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                    <History className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
                     <span>{gen.generationType}</span>
                     <span aria-hidden="true">·</span>
                     <span>{gen.category}</span>
                     <span aria-hidden="true">·</span>
                     <span className="font-mono-tabular">{gen.modelUsed}</span>
                   </div>
-                  <p className="text-sm font-medium text-[#F3F1FA]">{gen.promptSummary}</p>
-                  <p className="text-xs text-[#A39EBA]">{gen.resultsSummary}</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{gen.promptSummary}</p>
+                  <p className="text-xs text-[var(--text-secondary)]">{gen.resultsSummary}</p>
                 </div>
                 <Button
                   variant="ghost"
@@ -1480,7 +1519,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             />
           </div>
 
-          <div className="flex justify-end gap-2 pt-3 border-t border-[#1E2436]">
+          <div className="flex justify-end gap-2 pt-3 border-t border-[var(--border-subtle)]">
             <Button
               type="button"
               variant="ghost"
@@ -1508,28 +1547,28 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
           {comparedCandidates.map((c) => (
             <div
               key={c.id}
-              className="p-4 bg-[#0D1018] border border-[#23293B] rounded-xl space-y-2.5"
+              className="p-4 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-xl space-y-2.5"
             >
               <div className="flex items-baseline justify-between">
-                <h4 className="text-xl font-semibold text-[#F3F1FA] font-serif-display">
+                <h4 className="text-xl font-semibold text-[var(--text-primary)] font-serif-display">
                   {c.name}
                 </h4>
-                <span className="text-xs font-mono-tabular text-[#C4B5FD]">
+                <span className="text-xs font-mono-tabular text-[var(--accent-primary)]">
                   /{c.pronunciation}/
                 </span>
               </div>
               {c.titleOrVariation && (
-                <p className="text-xs text-[#9D97B8]">{c.titleOrVariation}</p>
+                <p className="text-xs text-[var(--text-secondary)]">{c.titleOrVariation}</p>
               )}
-              <div className="text-xs space-y-1.5 pt-2 border-t border-[#1A2030]">
+              <div className="text-xs space-y-1.5 pt-2 border-t border-[var(--border-subtle)]">
                 <p>
-                  <span className="text-[#736E8A]">Meaning:</span> {c.interpretation}
+                  <span className="text-[var(--text-muted)]">Meaning:</span> {c.interpretation}
                 </p>
                 <p>
-                  <span className="text-[#736E8A]">Linguistic Root:</span> {c.inspiration}
+                  <span className="text-[var(--text-muted)]">Linguistic Root:</span> {c.inspiration}
                 </p>
                 <p>
-                  <span className="text-[#736E8A]">Suitability:</span> {c.suitability}
+                  <span className="text-[var(--text-muted)]">Suitability:</span> {c.suitability}
                 </p>
               </div>
               <div className="pt-2 flex gap-2">
@@ -1624,7 +1663,7 @@ export const NamingEngineView: React.FC<NamingEngineViewProps> = ({
             />
           </div>
 
-          <div className="flex items-center justify-end gap-3 pt-4 border-t border-[#1E2436]">
+          <div className="flex items-center justify-end gap-3 pt-4 border-t border-[var(--border-subtle)]">
             <Button type="button" variant="ghost" onClick={() => setRuleModalOpen(false)}>
               Cancel
             </Button>

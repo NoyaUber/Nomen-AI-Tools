@@ -8,9 +8,16 @@ export interface AiProviderStatus {
   message: string;
 }
 
-const GEMINI_DEFAULT_MODEL = 'gemini-3.8-flash';
 const GEMINI_LITE_MODEL = 'gemini-3.1-flash-lite';
+const GEMINI_DEFAULT_MODEL = 'gemini-3.8-flash';
 const GEMINI_FALLBACK_MODEL = 'gemini-flash-latest';
+
+// Track models that hit a 429 quota limit so we skip them during their cooldown window
+const modelCooldownUntil = new Map<string, number>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -44,6 +51,17 @@ function isGeminiModelName(model: string | undefined): boolean {
   return m.startsWith('gemini-') && !m.includes('/');
 }
 
+export function formatCleanAiError(rawError: unknown): string {
+  const raw = rawError instanceof Error ? rawError.message : String(rawError);
+  if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('"code":429')) {
+    return 'Kuota harian gratis (Free Tier 20 request/hari) untuk model Gemini telah habis atau sedang sibuk (503). Anda dapat memilih API key dengan billing aktif di panel Settings > Secrets untuk kuota lebih tinggi.';
+  }
+  if (raw.includes('UNAVAILABLE') || raw.includes('"code":503')) {
+    return 'Server AI sedang mengalami lonjakan trafik sementara (503 High Demand). Silakan coba lagi dalam beberapa saat.';
+  }
+  return raw.slice(0, 280);
+}
+
 export function getAiProviderStatus(): AiProviderStatus {
   const aiProvider = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
   const aiApiKey = process.env.AI_API_KEY;
@@ -72,7 +90,7 @@ export function getAiProviderStatus(): AiProviderStatus {
   if (hasGeminiKey || hasCustomProviderKey) {
     const resolvedGeminiModel = isGeminiModelName(aiModel)
       ? aiModel!
-      : GEMINI_DEFAULT_MODEL;
+      : GEMINI_LITE_MODEL;
     return {
       configured: true,
       provider: 'gemini',
@@ -85,7 +103,7 @@ export function getAiProviderStatus(): AiProviderStatus {
   return {
     configured: false,
     provider: aiProvider,
-    model: aiModel || GEMINI_DEFAULT_MODEL,
+    model: aiModel || GEMINI_LITE_MODEL,
     hasGeminiFallback: false,
     message:
       'AI provider is not configured. Please set GEMINI_API_KEY or AI_API_KEY in Settings > Secrets.',
@@ -210,62 +228,102 @@ async function callGeminiSdk(params: {
   });
 
   const envModel = process.env.AI_MODEL;
-  const modelsToTry = [
+  // Put gemini-3.1-flash-lite first when gemini-3.8-flash is on quota cooldown, and retry 503 spikes
+  const allCandidates = [
     ...(isGeminiModelName(envModel) ? [envModel!] : []),
-    GEMINI_DEFAULT_MODEL,
     GEMINI_LITE_MODEL,
+    GEMINI_DEFAULT_MODEL,
     GEMINI_FALLBACK_MODEL,
   ].filter((v, i, a) => a.indexOf(v) === i);
+
+  const now = Date.now();
+  const activeModels = allCandidates.filter(
+    (m) => (modelCooldownUntil.get(m) || 0) < now
+  );
+  const modelsToTry = activeModels.length > 0 ? activeModels : [GEMINI_LITE_MODEL];
 
   const errors: string[] = [];
   let lastErr: Error | null = null;
 
   for (const modelName of modelsToTry) {
-    try {
-      const supportsThinkingLevelLow = modelName.startsWith('gemini-3.8') || modelName.startsWith('gemini-4');
-      const sysInstruction =
-        params.responseMimeType === 'application/json' && params.jsonInstruction
-          ? `${params.systemInstruction}\n\nRequired JSON structure:\n${params.jsonInstruction}`
-          : params.systemInstruction;
+    // Up to 2 retries on 503 high-demand spikes
+    const maxAttempts = modelName === GEMINI_LITE_MODEL ? 3 : 1;
 
-      const response = await withTimeout(
-        ai.models.generateContent({
-          model: modelName,
-          contents: params.prompt,
-          config: {
-            systemInstruction: sysInstruction,
-            ...(supportsThinkingLevelLow
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : {}),
-            ...(params.responseMimeType ? { responseMimeType: params.responseMimeType } : {}),
-            ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
-          },
-        }),
-        15000,
-        modelName
-      );
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const supportsThinkingLevelLow =
+          modelName.startsWith('gemini-3.8') || modelName.startsWith('gemini-4');
+        const sysInstruction =
+          params.responseMimeType === 'application/json' && params.jsonInstruction
+            ? `${params.systemInstruction}\n\nRequired JSON structure:\n${params.jsonInstruction}`
+            : params.systemInstruction;
 
-      const text = (response.text ?? '').trim();
-      if (!text) {
-        throw new Error(`Empty response from Gemini model ${modelName}`);
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: modelName,
+            contents: params.prompt,
+            config: {
+              systemInstruction: sysInstruction,
+              ...(supportsThinkingLevelLow
+                ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                : {}),
+              ...(params.responseMimeType
+                ? { responseMimeType: params.responseMimeType }
+                : {}),
+              ...(params.responseSchema
+                ? { responseSchema: params.responseSchema }
+                : {}),
+            },
+          }),
+          15000,
+          modelName
+        );
+
+        const text = (response.text ?? '').trim();
+        if (!text) {
+          throw new Error(`Empty response from Gemini model ${modelName}`);
+        }
+
+        return {
+          text:
+            params.responseMimeType === 'application/json'
+              ? extractJsonFromText(text)
+              : text,
+          modelUsed: modelName,
+        };
+      } catch (err) {
+        lastErr = err instanceof Error ? err : new Error(String(err));
+        const msg = lastErr.message || '';
+
+        // If 429 quota exceeded, put this model (and its alias) on a 30-minute cooldown
+        if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
+          const cooldownExpiry = Date.now() + 30 * 60 * 1000;
+          modelCooldownUntil.set(modelName, cooldownExpiry);
+          if (modelName === GEMINI_DEFAULT_MODEL || modelName === GEMINI_FALLBACK_MODEL) {
+            modelCooldownUntil.set(GEMINI_DEFAULT_MODEL, cooldownExpiry);
+            modelCooldownUntil.set(GEMINI_FALLBACK_MODEL, cooldownExpiry);
+          }
+          errors.push(`${modelName}: 429 Quota Exceeded`);
+          break; // Don't retry 429 on the same model
+        }
+
+        // If 503 high demand and we have attempts remaining, wait and retry
+        if (
+          (msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('Timeout')) &&
+          attempt < maxAttempts
+        ) {
+          await sleep(750 * attempt);
+          continue;
+        }
+
+        errors.push(`${modelName}: ${msg}`);
+        break;
       }
-
-      return {
-        text:
-          params.responseMimeType === 'application/json'
-            ? extractJsonFromText(text)
-            : text,
-        modelUsed: modelName,
-      };
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
-      const msg = lastErr.message || '';
-      errors.push(`${modelName}: ${msg}`);
     }
   }
 
-  console.error('Gemini fallback exhausted:', errors.join(' | '));
-  throw new Error(errors.join(' | ') || lastErr?.message || 'Gemini API call failed.');
+  console.warn('Gemini models unavailable or quota reached:', errors.join(' | '));
+  throw new Error(formatCleanAiError(errors.join(' | ') || lastErr?.message || 'Gemini API call failed.'));
 }
 
 export async function generateStructuredOrText(params: {
@@ -295,10 +353,6 @@ export async function generateStructuredOrText(params: {
         jsonInstruction: params.jsonInstruction,
       });
     } catch (openRouterError) {
-      console.warn(
-        'Primary AI_PROVIDER failed, checking Gemini fallback:',
-        openRouterError instanceof Error ? openRouterError.message : openRouterError
-      );
       if (hasGeminiKey) {
         return await callGeminiSdk({
           prompt: params.prompt,
@@ -312,7 +366,6 @@ export async function generateStructuredOrText(params: {
     }
   }
 
-  // Default to Gemini SDK, with fallback to OpenRouter if AI_API_KEY is present
   try {
     return await callGeminiSdk({
       prompt: params.prompt,

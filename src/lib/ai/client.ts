@@ -56,6 +56,7 @@ export async function generateNamesApi(payload: {
     genre?: string;
     worldSettings?: string;
     language?: string;
+    customAiInstructions?: string;
   };
   parameters: Record<string, string>;
   activeRules?: {
@@ -88,15 +89,19 @@ export async function generateNameVariationsApi(payload: {
 
 export async function generateCharacterProfileApi(payload: {
   prompt: string;
+  count?: number;
   projectContext?: {
     title?: string;
     genre?: string;
     worldSettings?: string;
     language?: string;
+    customAiInstructions?: string;
+    relevantCanonSummary?: string;
   };
   activeRules?: string[];
 }): Promise<{
   character: Record<string, string>;
+  candidates?: Record<string, string>[];
   modelUsed: string;
 }> {
   return postJson('/api/ai/character', payload);
@@ -106,13 +111,17 @@ export async function generateEntityBlueprintApi(payload: {
   category: 'location' | 'organization' | 'item' | 'ability' | 'lore';
   subCategory: string;
   prompt: string;
+  count?: number;
   projectContext?: {
     title?: string;
     genre?: string;
     worldSettings?: string;
+    customAiInstructions?: string;
+    relevantCanonSummary?: string;
   };
 }): Promise<{
   result: Record<string, string>;
+  candidates?: Record<string, string>[];
   modelUsed: string;
 }> {
   return postJson('/api/ai/entity-assist', payload);
@@ -122,6 +131,7 @@ export async function askWritingAssistantApi(payload: {
   question: string;
   contextScope: AssistantContextScope;
   contextPayload: string;
+  customAiInstructions?: string;
   history?: { role: 'user' | 'assistant'; content: string }[];
 }): Promise<{
   reply: string;
@@ -133,6 +143,7 @@ export async function askWritingAssistantApi(payload: {
 export async function runConsistencyCheckApi(payload: {
   projectTitle: string;
   worldSettings: string;
+  customAiInstructions?: string;
   entities: {
     id: string;
     category: string;
@@ -171,3 +182,74 @@ export async function runConsistencyCheckApi(payload: {
 }> {
   return postJson('/api/ai/consistency', payload);
 }
+
+// ============================================================================
+// PHASE 11 — VISUAL ASSET UPLOAD, IMAGE PROMPT ASSISTANT & OPTIONAL IMAGE GEN
+// ============================================================================
+
+export async function uploadVisualAssetFileApi(payload: {
+  ownerId: string;
+  projectId: string;
+  assetId?: string;
+  fileName: string;
+  mimeType: string;
+  base64Data: string;
+  title?: string;
+  category?: string;
+}): Promise<{
+  storagePath: string;
+  publicUrl: string;
+  fileSize: number;
+  mimeType: string;
+}> {
+  return postJson('/api/assets/upload', payload);
+}
+
+export async function generateImagePromptApi(payload: {
+  assetCategory: string;
+  entityName: string;
+  entityType?: string;
+  attributes?: Record<string, string>;
+  artStyle?: string;
+  lightingMood?: string;
+  aspectRatio?: string;
+  projectContext?: {
+    title?: string;
+    genre?: string;
+    worldSettings?: string;
+    customAiInstructions?: string;
+  };
+}): Promise<{
+  mainPrompt: string;
+  negativePrompt: string;
+  artDirectionNotes: string;
+  lightingAndPalette: string;
+  compositionNotes: string;
+  modelUsed: string;
+}> {
+  return postJson('/api/ai/image-prompt', payload);
+}
+
+export async function generateVisualConceptApi(payload: {
+  ownerId: string;
+  projectId: string;
+  prompt: string;
+  assetCategory: string;
+  entityName: string;
+  aspectRatio?: string;
+}): Promise<{
+  supported: boolean;
+  isAiRaster: boolean;
+  storagePath: string;
+  publicUrl: string;
+  mimeType: string;
+  fileSize: number;
+  width: number;
+  height: number;
+  modelUsed: string;
+  notice: string;
+}> {
+  return postJson('/api/ai/generate-image', payload);
+}
+
+

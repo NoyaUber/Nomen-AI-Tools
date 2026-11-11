@@ -177,6 +177,66 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidEntityVersion(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'targetId', 'targetType', 'targetName', 'versionNumber', 'changeSummary', 'snapshot', 'authorName', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'targetId', 'targetType', 'targetName', 'versionNumber', 'changeSummary', 'snapshot', 'authorName', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && isValidId(data.targetId)
+        && data.targetType is string && data.targetType.size() <= 40
+        && (data.targetType == 'entity' || data.targetType == 'lore' || data.targetType == 'timeline')
+        && data.targetName is string && data.targetName.size() >= 1 && data.targetName.size() <= 240
+        && (data.versionNumber is int || data.versionNumber is float)
+        && data.changeSummary is string && data.changeSummary.size() <= 500
+        && data.snapshot is map && data.snapshot.size() <= 60
+        && data.authorName is string && data.authorName.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
+    function isValidProjectAiSetting(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'instructions', 'isEnabled', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'instructions', 'isEnabled', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.instructions is string && data.instructions.size() <= 6000
+        && data.isEnabled is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTrashItem(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'originalId', 'itemType', 'category', 'subCategory', 'name', 'summary', 'snapshot', 'deletedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'originalId', 'itemType', 'category', 'subCategory', 'name', 'summary', 'snapshot', 'deletedAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && isValidId(data.originalId)
+        && data.itemType is string && data.itemType.size() <= 40
+        && (data.itemType == 'entity' || data.itemType == 'lore' || data.itemType == 'timeline')
+        && data.category is string && data.category.size() <= 80
+        && data.subCategory is string && data.subCategory.size() <= 100
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 240
+        && data.summary is string && data.summary.size() <= 2000
+        && data.snapshot is map && data.snapshot.size() <= 60
+        && data.deletedAt is timestamp;
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['ownerId', 'projectId', 'actionType', 'targetType', 'targetName', 'details', 'actorName', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'projectId', 'actionType', 'targetType', 'targetName', 'details', 'actorName', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidId(data.projectId)
+        && data.actionType is string && data.actionType.size() >= 1 && data.actionType.size() <= 80
+        && data.targetType is string && data.targetType.size() <= 80
+        && data.targetName is string && data.targetName.size() <= 240
+        && data.details is string && data.details.size() <= 1000
+        && data.actorName is string && data.actorName.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
     // 1. PROFILES (PII Isolated to strict owner)
     match /profiles/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
@@ -394,6 +454,83 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isVerifiedUser()
         && isValidId(favoriteId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 10. ENTITY VERSIONS (Immutable Version History Snapshots)
+    match /entity_versions/{versionId} {
+      allow get: if isSignedIn() && isValidId(versionId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(versionId)
+        && isValidEntityVersion(incoming())
+        && incoming().createdAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if false;
+      allow delete: if isVerifiedUser()
+        && isValidId(versionId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 11. PROJECT AI SETTINGS (Custom AI Instructions per Project)
+    match /project_ai_settings/{settingId} {
+      allow get: if isSignedIn() && isValidId(settingId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(settingId)
+        && isValidProjectAiSetting(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if isVerifiedUser()
+        && isValidId(settingId)
+        && isValidProjectAiSetting(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update Custom AI Instructions or Toggle Enabled
+          incoming().diff(existing()).affectedKeys().hasOnly(['instructions', 'isEnabled', 'updatedAt'])
+        )
+        && ownsProject(existing().projectId);
+      allow delete: if isVerifiedUser()
+        && isValidId(settingId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 12. TRASH ITEMS (Soft-Deleted Project Records)
+    match /trash_items/{trashId} {
+      allow get: if isSignedIn() && isValidId(trashId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(trashId)
+        && isValidTrashItem(incoming())
+        && incoming().deletedAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if false;
+      allow delete: if isVerifiedUser()
+        && isValidId(trashId)
+        && existing().ownerId == request.auth.uid
+        && ownsProject(existing().projectId);
+    }
+
+    // 13. ACTIVITY LOGS (Immutable Project Audit Trail)
+    match /activity_logs/{activityId} {
+      allow get: if isSignedIn() && isValidId(activityId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(activityId)
+        && isValidActivityLog(incoming())
+        && incoming().createdAt == request.time
+        && ownsProject(incoming().projectId);
+      allow update: if false;
+      allow delete: if isVerifiedUser()
+        && isValidId(activityId)
         && existing().ownerId == request.auth.uid
         && ownsProject(existing().projectId);
     }

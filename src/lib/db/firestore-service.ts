@@ -13,15 +13,22 @@ import {
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../firebase';
 import {
+  ActivityLog,
   AiGenerationRecord,
+  AssetCategory,
   EntityCategory,
   EntityRelation,
+  EntityVersion,
   FavoriteItem,
   LoreEntry,
   NamingRule,
   Project,
+  ProjectAiSetting,
   TimelineEvent,
+  TrashItem,
   UserProfile,
+  VersionTargetType,
+  VisualAsset,
   WorldEntity,
 } from '../../types/nomen';
 
@@ -37,13 +44,21 @@ function makeId(prefix = 'id'): string {
 
 function sanitizeAttributes(attrs: Record<string, string | undefined>): Record<string, string> {
   const out: Record<string, string> = {};
-  const entries = Object.entries(attrs).slice(0, 48);
+  const entries = Object.entries(attrs || {}).slice(0, 48);
   for (const [k, v] of entries) {
     if (typeof v === 'string') {
       out[k.slice(0, 64)] = v.slice(0, 4000);
     }
   }
   return out;
+}
+
+function currentActorName(): string {
+  return cleanStr(
+    auth.currentUser?.displayName || auth.currentUser?.email || 'Author',
+    120,
+    'Author'
+  );
 }
 
 // ============================================================================
@@ -131,6 +146,13 @@ export async function createProject(input: {
   };
   try {
     await setDoc(ref, payload);
+    await recordActivityLog({
+      projectId: id,
+      actionType: 'Project created',
+      targetType: 'project',
+      targetName: payload.title,
+      details: `Initialized universe in genre "${payload.genre}" (${payload.language})`,
+    });
     return id;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `projects/${id}`);
@@ -159,6 +181,13 @@ export async function updateProject(
       status: updates.status === 'archived' ? 'archived' : 'active',
       updatedAt: serverTimestamp(),
     });
+    await recordActivityLog({
+      projectId,
+      actionType: 'Project updated',
+      targetType: 'project',
+      targetName: updates.title,
+      details: `Updated project settings (${updates.status})`,
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `projects/${projectId}`);
   }
@@ -176,6 +205,11 @@ export async function deleteProjectWithCascade(projectId: string): Promise<void>
     'naming_rules',
     'ai_generations',
     'favorites',
+    'entity_versions',
+    'project_ai_settings',
+    'trash_items',
+    'activity_logs',
+    'visual_assets',
   ];
 
   for (const colName of childCollections) {
@@ -202,7 +236,7 @@ export async function deleteProjectWithCascade(projectId: string): Promise<void>
 }
 
 // ============================================================================
-// 3. ENTITIES
+// 3. ENTITIES (With Automatic Version Snapshots & Soft-Delete Trash Support)
 // ============================================================================
 export function subscribeToProjectEntities(
   uid: string,
@@ -228,6 +262,7 @@ export function subscribeToProjectEntities(
 }
 
 export async function createEntity(input: {
+  id?: string;
   projectId: string;
   category: EntityCategory;
   subCategory: string;
@@ -236,11 +271,13 @@ export async function createEntity(input: {
   summary: string;
   parentId?: string;
   attributes: Record<string, string | undefined>;
+  skipActivityLog?: boolean;
 }): Promise<string> {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Must be signed in');
-  const id = makeId('ent');
+  const id = input.id && /^[a-zA-Z0-9_-]+$/.test(input.id) ? input.id : makeId('ent');
   const ref = doc(db, 'entities', id);
+  const sanitizedAttrs = sanitizeAttributes(input.attributes);
   const payload = {
     ownerId: uid,
     projectId: input.projectId,
@@ -250,12 +287,37 @@ export async function createEntity(input: {
     subtitle: cleanStr(input.subtitle, 300, ''),
     summary: cleanStr(input.summary, 4000, ''),
     parentId: cleanStr(input.parentId, 128, ''),
-    attributes: sanitizeAttributes(input.attributes),
+    attributes: sanitizedAttrs,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
   try {
     await setDoc(ref, payload);
+    await createEntityVersionSnapshot({
+      projectId: input.projectId,
+      targetId: id,
+      targetType: 'entity',
+      targetName: payload.name,
+      changeSummary: `Initial creation (${payload.subCategory || payload.category})`,
+      snapshot: {
+        category: payload.category,
+        subCategory: payload.subCategory,
+        name: payload.name,
+        subtitle: payload.subtitle,
+        summary: payload.summary,
+        parentId: payload.parentId,
+        ...sanitizedAttrs,
+      },
+    });
+    if (!input.skipActivityLog) {
+      await recordActivityLog({
+        projectId: input.projectId,
+        actionType: 'Entity created',
+        targetType: payload.category,
+        targetName: payload.name,
+        details: `Created ${payload.subCategory || payload.category} "${payload.name}"`,
+      });
+    }
     return id;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `entities/${id}`);
@@ -272,10 +334,18 @@ export async function updateEntity(
     summary: string;
     parentId?: string;
     attributes: Record<string, string | undefined>;
+    changeSummary?: string;
+    isAutosave?: boolean;
   }
 ): Promise<void> {
   const ref = doc(db, 'entities', entityId);
+  const sanitizedAttrs = sanitizeAttributes(updates.attributes);
   try {
+    const existingSnap = await getDoc(ref);
+    const existingData = existingSnap.exists()
+      ? (existingSnap.data() as WorldEntity)
+      : null;
+
     await updateDoc(ref, {
       category: updates.category,
       subCategory: cleanStr(updates.subCategory, 100, ''),
@@ -283,24 +353,83 @@ export async function updateEntity(
       subtitle: cleanStr(updates.subtitle, 300, ''),
       summary: cleanStr(updates.summary, 4000, ''),
       parentId: cleanStr(updates.parentId, 128, ''),
-      attributes: sanitizeAttributes(updates.attributes),
+      attributes: sanitizedAttrs,
       updatedAt: serverTimestamp(),
     });
+
+    if (existingData?.projectId) {
+      await createEntityVersionSnapshot({
+        projectId: existingData.projectId,
+        targetId: entityId,
+        targetType: 'entity',
+        targetName: cleanStr(updates.name, 200, 'Unnamed Entity'),
+        changeSummary:
+          updates.changeSummary ||
+          (updates.isAutosave ? 'Autosaved dossier changes' : 'Updated entity dossier'),
+        snapshot: {
+          category: updates.category,
+          subCategory: cleanStr(updates.subCategory, 100, ''),
+          name: cleanStr(updates.name, 200, 'Unnamed Entity'),
+          subtitle: cleanStr(updates.subtitle, 300, ''),
+          summary: cleanStr(updates.summary, 4000, ''),
+          parentId: cleanStr(updates.parentId, 128, ''),
+          ...sanitizedAttrs,
+        },
+      });
+
+      if (!updates.isAutosave) {
+        await recordActivityLog({
+          projectId: existingData.projectId,
+          actionType: 'Entity updated',
+          targetType: updates.category,
+          targetName: cleanStr(updates.name, 200, 'Unnamed Entity'),
+          details: updates.changeSummary || `Updated ${updates.subCategory || updates.category}`,
+        });
+      }
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `entities/${entityId}`);
   }
 }
 
-export async function deleteEntity(entityId: string): Promise<void> {
+export async function deleteEntity(
+  entityId: string,
+  options?: { permanent?: boolean }
+): Promise<void> {
+  const ref = doc(db, 'entities', entityId);
   try {
-    await deleteDoc(doc(db, 'entities', entityId));
+    if (!options?.permanent) {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data() as Omit<WorldEntity, 'id'>;
+        await moveRecordToTrash({
+          projectId: data.projectId,
+          originalId: entityId,
+          itemType: 'entity',
+          category: data.category,
+          subCategory: data.subCategory,
+          name: data.name,
+          summary: data.summary,
+          snapshot: {
+            category: data.category,
+            subCategory: data.subCategory,
+            name: data.name,
+            subtitle: data.subtitle,
+            summary: data.summary,
+            parentId: data.parentId || '',
+            ...(data.attributes || {}),
+          },
+        });
+      }
+    }
+    await deleteDoc(ref);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `entities/${entityId}`);
   }
 }
 
 // ============================================================================
-// 4. ENTITY RELATIONS
+// 4. ENTITY RELATIONS (With Edit & Duplicate Guard)
 // ============================================================================
 export function subscribeToProjectRelations(
   uid: string,
@@ -337,6 +466,9 @@ export async function createEntityRelation(input: {
 }): Promise<string> {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Must be signed in');
+  if (input.sourceEntityId === input.targetEntityId) {
+    throw new Error('An entity cannot be linked to itself.');
+  }
   const id = makeId('rel');
   const ref = doc(db, 'entity_relations', id);
   try {
@@ -352,22 +484,78 @@ export async function createEntityRelation(input: {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+    await recordActivityLog({
+      projectId: input.projectId,
+      actionType: 'Relationship created',
+      targetType: 'relation',
+      targetName: `${input.sourceEntityName} → ${input.targetEntityName}`,
+      details: `Linked as "${input.relationType}"`,
+    });
     return id;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `entity_relations/${id}`);
   }
 }
 
-export async function deleteEntityRelation(relationId: string): Promise<void> {
+export async function updateEntityRelation(
+  relationId: string,
+  updates: {
+    sourceEntityId: string;
+    sourceEntityName: string;
+    targetEntityId: string;
+    targetEntityName: string;
+    relationType: string;
+    description: string;
+    projectId?: string;
+  }
+): Promise<void> {
+  const ref = doc(db, 'entity_relations', relationId);
   try {
-    await deleteDoc(doc(db, 'entity_relations', relationId));
+    await updateDoc(ref, {
+      sourceEntityId: cleanStr(updates.sourceEntityId, 128),
+      sourceEntityName: cleanStr(updates.sourceEntityName, 200, 'Source'),
+      targetEntityId: cleanStr(updates.targetEntityId, 128),
+      targetEntityName: cleanStr(updates.targetEntityName, 200, 'Target'),
+      relationType: cleanStr(updates.relationType, 120, 'Connected to'),
+      description: cleanStr(updates.description, 2000, ''),
+      updatedAt: serverTimestamp(),
+    });
+    if (updates.projectId) {
+      await recordActivityLog({
+        projectId: updates.projectId,
+        actionType: 'Relationship updated',
+        targetType: 'relation',
+        targetName: `${updates.sourceEntityName} → ${updates.targetEntityName}`,
+        details: `Updated relation to "${updates.relationType}"`,
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `entity_relations/${relationId}`);
+  }
+}
+
+export async function deleteEntityRelation(relationId: string): Promise<void> {
+  const ref = doc(db, 'entity_relations', relationId);
+  try {
+    const snap = await getDoc(ref);
+    const data = snap.exists() ? (snap.data() as Omit<EntityRelation, 'id'>) : null;
+    await deleteDoc(ref);
+    if (data) {
+      await recordActivityLog({
+        projectId: data.projectId,
+        actionType: 'Relationship removed',
+        targetType: 'relation',
+        targetName: `${data.sourceEntityName} → ${data.targetEntityName}`,
+        details: `Removed relation "${data.relationType}"`,
+      });
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `entity_relations/${relationId}`);
   }
 }
 
 // ============================================================================
-// 5. LORE ENTRIES
+// 5. LORE ENTRIES (With Version Snapshots & Soft-Delete Trash Support)
 // ============================================================================
 export function subscribeToLoreEntries(
   uid: string,
@@ -394,6 +582,7 @@ export function subscribeToLoreEntries(
 }
 
 export async function createLoreEntry(input: {
+  id?: string;
   projectId: string;
   title: string;
   category: string;
@@ -403,19 +592,41 @@ export async function createLoreEntry(input: {
 }): Promise<string> {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Must be signed in');
-  const id = makeId('lore');
+  const id = input.id && /^[a-zA-Z0-9_-]+$/.test(input.id) ? input.id : makeId('lore');
   const ref = doc(db, 'lore_entries', id);
+  const payload = {
+    ownerId: uid,
+    projectId: input.projectId,
+    title: cleanStr(input.title, 240, 'Untitled Chronicle'),
+    category: cleanStr(input.category, 80, 'World History'),
+    era: cleanStr(input.era, 120, ''),
+    summary: cleanStr(input.summary, 2000, ''),
+    content: cleanStr(input.content, 20000, ''),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
   try {
-    await setDoc(ref, {
-      ownerId: uid,
+    await setDoc(ref, payload);
+    await createEntityVersionSnapshot({
       projectId: input.projectId,
-      title: cleanStr(input.title, 240, 'Untitled Chronicle'),
-      category: cleanStr(input.category, 80, 'World History'),
-      era: cleanStr(input.era, 120, ''),
-      summary: cleanStr(input.summary, 2000, ''),
-      content: cleanStr(input.content, 20000, ''),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      targetId: id,
+      targetType: 'lore',
+      targetName: payload.title,
+      changeSummary: `Created Lore Chronicle (${payload.category})`,
+      snapshot: {
+        title: payload.title,
+        category: payload.category,
+        era: payload.era,
+        summary: payload.summary,
+        content: payload.content.slice(0, 3900),
+      },
+    });
+    await recordActivityLog({
+      projectId: input.projectId,
+      actionType: 'Entity created',
+      targetType: 'lore',
+      targetName: payload.title,
+      details: `Recorded lore chronicle in "${payload.category}"`,
     });
     return id;
   } catch (error) {
@@ -431,10 +642,17 @@ export async function updateLoreEntry(
     era: string;
     summary: string;
     content: string;
+    changeSummary?: string;
+    isAutosave?: boolean;
   }
 ): Promise<void> {
   const ref = doc(db, 'lore_entries', loreId);
   try {
+    const existingSnap = await getDoc(ref);
+    const existingData = existingSnap.exists()
+      ? (existingSnap.data() as LoreEntry)
+      : null;
+
     await updateDoc(ref, {
       title: cleanStr(updates.title, 240, 'Untitled Chronicle'),
       category: cleanStr(updates.category, 80, 'World History'),
@@ -443,21 +661,75 @@ export async function updateLoreEntry(
       content: cleanStr(updates.content, 20000, ''),
       updatedAt: serverTimestamp(),
     });
+
+    if (existingData?.projectId) {
+      await createEntityVersionSnapshot({
+        projectId: existingData.projectId,
+        targetId: loreId,
+        targetType: 'lore',
+        targetName: cleanStr(updates.title, 240, 'Untitled Chronicle'),
+        changeSummary:
+          updates.changeSummary ||
+          (updates.isAutosave ? 'Autosaved lore chronicle' : 'Updated lore chronicle'),
+        snapshot: {
+          title: cleanStr(updates.title, 240, 'Untitled Chronicle'),
+          category: cleanStr(updates.category, 80, 'World History'),
+          era: cleanStr(updates.era, 120, ''),
+          summary: cleanStr(updates.summary, 2000, ''),
+          content: cleanStr(updates.content, 3900, ''),
+        },
+      });
+      if (!updates.isAutosave) {
+        await recordActivityLog({
+          projectId: existingData.projectId,
+          actionType: 'Entity updated',
+          targetType: 'lore',
+          targetName: cleanStr(updates.title, 240, 'Untitled Chronicle'),
+          details: `Updated lore chronicle (${updates.category})`,
+        });
+      }
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `lore_entries/${loreId}`);
   }
 }
 
-export async function deleteLoreEntry(loreId: string): Promise<void> {
+export async function deleteLoreEntry(
+  loreId: string,
+  options?: { permanent?: boolean }
+): Promise<void> {
+  const ref = doc(db, 'lore_entries', loreId);
   try {
-    await deleteDoc(doc(db, 'lore_entries', loreId));
+    if (!options?.permanent) {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data() as Omit<LoreEntry, 'id'>;
+        await moveRecordToTrash({
+          projectId: data.projectId,
+          originalId: loreId,
+          itemType: 'lore',
+          category: data.category,
+          subCategory: data.era || 'Lore Chronicle',
+          name: data.title,
+          summary: data.summary || data.content.slice(0, 300),
+          snapshot: {
+            title: data.title,
+            category: data.category,
+            era: data.era,
+            summary: data.summary,
+            content: data.content.slice(0, 3900),
+          },
+        });
+      }
+    }
+    await deleteDoc(ref);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `lore_entries/${loreId}`);
   }
 }
 
 // ============================================================================
-// 6. TIMELINE EVENTS
+// 6. TIMELINE EVENTS (With Version Snapshots & Soft-Delete Trash Support)
 // ============================================================================
 export function subscribeToTimelineEvents(
   uid: string,
@@ -484,6 +756,7 @@ export function subscribeToTimelineEvents(
 }
 
 export async function createTimelineEvent(input: {
+  id?: string;
   projectId: string;
   title: string;
   dateLabel: string;
@@ -496,22 +769,47 @@ export async function createTimelineEvent(input: {
 }): Promise<string> {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Must be signed in');
-  const id = makeId('evt');
+  const id = input.id && /^[a-zA-Z0-9_-]+$/.test(input.id) ? input.id : makeId('evt');
   const ref = doc(db, 'timeline_events', id);
+  const payload = {
+    ownerId: uid,
+    projectId: input.projectId,
+    title: cleanStr(input.title, 240, 'Untitled Event'),
+    dateLabel: cleanStr(input.dateLabel, 120, 'Year 1'),
+    sortOrder: Number.isFinite(input.sortOrder) ? input.sortOrder : 0,
+    era: cleanStr(input.era, 120, ''),
+    category: cleanStr(input.category, 80, 'Historical Event'),
+    locationName: cleanStr(input.locationName, 200, ''),
+    participants: cleanStr(input.participants, 1000, ''),
+    description: cleanStr(input.description, 6000, ''),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
   try {
-    await setDoc(ref, {
-      ownerId: uid,
+    await setDoc(ref, payload);
+    await createEntityVersionSnapshot({
       projectId: input.projectId,
-      title: cleanStr(input.title, 240, 'Untitled Event'),
-      dateLabel: cleanStr(input.dateLabel, 120, 'Year 1'),
-      sortOrder: Number.isFinite(input.sortOrder) ? input.sortOrder : 0,
-      era: cleanStr(input.era, 120, ''),
-      category: cleanStr(input.category, 80, 'Historical Event'),
-      locationName: cleanStr(input.locationName, 200, ''),
-      participants: cleanStr(input.participants, 1000, ''),
-      description: cleanStr(input.description, 6000, ''),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      targetId: id,
+      targetType: 'timeline',
+      targetName: payload.title,
+      changeSummary: `Created timeline event (${payload.dateLabel})`,
+      snapshot: {
+        title: payload.title,
+        dateLabel: payload.dateLabel,
+        sortOrder: String(payload.sortOrder),
+        era: payload.era,
+        category: payload.category,
+        locationName: payload.locationName,
+        participants: payload.participants,
+        description: payload.description.slice(0, 3900),
+      },
+    });
+    await recordActivityLog({
+      projectId: input.projectId,
+      actionType: 'Entity created',
+      targetType: 'timeline',
+      targetName: payload.title,
+      details: `Added timeline event at ${payload.dateLabel}`,
     });
     return id;
   } catch (error) {
@@ -530,10 +828,16 @@ export async function updateTimelineEvent(
     locationName: string;
     participants: string;
     description: string;
+    changeSummary?: string;
   }
 ): Promise<void> {
   const ref = doc(db, 'timeline_events', eventId);
   try {
+    const existingSnap = await getDoc(ref);
+    const existingData = existingSnap.exists()
+      ? (existingSnap.data() as TimelineEvent)
+      : null;
+
     await updateDoc(ref, {
       title: cleanStr(updates.title, 240, 'Untitled Event'),
       dateLabel: cleanStr(updates.dateLabel, 120, 'Year 1'),
@@ -545,14 +849,73 @@ export async function updateTimelineEvent(
       description: cleanStr(updates.description, 6000, ''),
       updatedAt: serverTimestamp(),
     });
+
+    if (existingData?.projectId) {
+      await createEntityVersionSnapshot({
+        projectId: existingData.projectId,
+        targetId: eventId,
+        targetType: 'timeline',
+        targetName: cleanStr(updates.title, 240, 'Untitled Event'),
+        changeSummary:
+          updates.changeSummary || `Updated timeline event (${updates.dateLabel})`,
+        snapshot: {
+          title: cleanStr(updates.title, 240, 'Untitled Event'),
+          dateLabel: cleanStr(updates.dateLabel, 120, 'Year 1'),
+          sortOrder: String(
+            Number.isFinite(updates.sortOrder) ? updates.sortOrder : 0
+          ),
+          era: cleanStr(updates.era, 120, ''),
+          category: cleanStr(updates.category, 80, 'Historical Event'),
+          locationName: cleanStr(updates.locationName, 200, ''),
+          participants: cleanStr(updates.participants, 1000, ''),
+          description: cleanStr(updates.description, 3900, ''),
+        },
+      });
+      await recordActivityLog({
+        projectId: existingData.projectId,
+        actionType: 'Entity updated',
+        targetType: 'timeline',
+        targetName: cleanStr(updates.title, 240, 'Untitled Event'),
+        details: `Updated timeline event (${updates.dateLabel})`,
+      });
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `timeline_events/${eventId}`);
   }
 }
 
-export async function deleteTimelineEvent(eventId: string): Promise<void> {
+export async function deleteTimelineEvent(
+  eventId: string,
+  options?: { permanent?: boolean }
+): Promise<void> {
+  const ref = doc(db, 'timeline_events', eventId);
   try {
-    await deleteDoc(doc(db, 'timeline_events', eventId));
+    if (!options?.permanent) {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data() as Omit<TimelineEvent, 'id'>;
+        await moveRecordToTrash({
+          projectId: data.projectId,
+          originalId: eventId,
+          itemType: 'timeline',
+          category: data.category,
+          subCategory: data.dateLabel,
+          name: data.title,
+          summary: data.description.slice(0, 400),
+          snapshot: {
+            title: data.title,
+            dateLabel: data.dateLabel,
+            sortOrder: String(data.sortOrder),
+            era: data.era,
+            category: data.category,
+            locationName: data.locationName,
+            participants: data.participants,
+            description: data.description.slice(0, 3900),
+          },
+        });
+      }
+    }
+    await deleteDoc(ref);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `timeline_events/${eventId}`);
   }
@@ -589,12 +952,13 @@ export async function createNamingRule(input: {
   projectId: string;
   title: string;
   category: string;
-  cultureOrGroup: string;
-  phoneticPattern: string;
-  prefixSuffixRule: string;
-  structureRule: string;
-  examples: string;
-  isActive: boolean;
+  cultureOrGroup?: string;
+  phoneticPattern?: string;
+  prefixSuffixRule?: string;
+  structureRule?: string;
+  morphologyNotes?: string;
+  examples?: string;
+  isActive?: boolean;
 }): Promise<string> {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Must be signed in');
@@ -608,10 +972,14 @@ export async function createNamingRule(input: {
       category: cleanStr(input.category, 80, 'Character names'),
       cultureOrGroup: cleanStr(input.cultureOrGroup, 160, ''),
       phoneticPattern: cleanStr(input.phoneticPattern, 1000, ''),
-      prefixSuffixRule: cleanStr(input.prefixSuffixRule, 1000, ''),
+      prefixSuffixRule: cleanStr(
+        input.prefixSuffixRule || input.morphologyNotes,
+        1000,
+        ''
+      ),
       structureRule: cleanStr(input.structureRule, 1000, ''),
       examples: cleanStr(input.examples, 1000, ''),
-      isActive: Boolean(input.isActive),
+      isActive: Boolean(input.isActive ?? true),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -707,8 +1075,15 @@ export async function recordAiGeneration(input: {
       category: cleanStr(input.category, 80, 'Character names'),
       promptSummary: cleanStr(input.promptSummary, 2000, ''),
       resultsSummary: cleanStr(input.resultsSummary, 8000, ''),
-      modelUsed: cleanStr(input.modelUsed, 80, 'gemini-3.8-flash'),
+      modelUsed: cleanStr(input.modelUsed, 80, 'gemini-3-flash-preview'),
       createdAt: serverTimestamp(),
+    });
+    await recordActivityLog({
+      projectId: input.projectId,
+      actionType: 'AI generation saved',
+      targetType: input.generationType,
+      targetName: input.category,
+      details: input.promptSummary.slice(0, 200),
     });
     return id;
   } catch (error) {
@@ -790,6 +1165,825 @@ export async function deleteFavorite(favoriteId: string): Promise<void> {
 }
 
 // ============================================================================
+// 10. ENTITY VERSIONS (Phase 7.1 — Version History & Restore)
+// ============================================================================
+const lastSnapshotTimeByTarget = new Map<string, number>();
+
+export function subscribeToProjectVersions(
+  uid: string,
+  projectId: string,
+  onData: (versions: EntityVersion[]) => void
+) {
+  const q = query(
+    collection(db, 'entity_versions'),
+    where('ownerId', '==', uid),
+    where('projectId', '==', projectId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: EntityVersion[] = snap.docs.map((d) => {
+        const raw = d.data() as Record<string, any>;
+        const targetId = raw.targetId || raw.entityId || '';
+        const targetType = (raw.targetType || 'entity') as VersionTargetType;
+        const targetName = raw.targetName || raw.entityName || 'Untitled Record';
+        const authorName = raw.authorName || raw.createdByName || 'Author';
+        return {
+          id: d.id,
+          ownerId: raw.ownerId || uid,
+          projectId: raw.projectId || projectId,
+          targetId,
+          entityId: targetId,
+          targetType,
+          entityType: (raw.entityType || targetType) as EntityVersion['entityType'],
+          targetName,
+          entityName: targetName,
+          versionNumber: Number(raw.versionNumber) || 1,
+          changeSummary: raw.changeSummary || '',
+          snapshot: raw.snapshot || {},
+          authorName,
+          createdByName: authorName,
+          createdAt: raw.createdAt?.toDate ? raw.createdAt.toDate().toISOString() : raw.createdAt,
+        };
+      });
+      list.sort((a, b) => b.versionNumber - a.versionNumber);
+      onData(list);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, 'entity_versions')
+  );
+}
+
+export async function createEntityVersionSnapshot(input: {
+  projectId: string;
+  targetId?: string;
+  entityId?: string;
+  targetType?: VersionTargetType;
+  entityType?: string;
+  targetName?: string;
+  entityName?: string;
+  changeSummary: string;
+  snapshot: Record<string, string | undefined>;
+  force?: boolean;
+}): Promise<string | null> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) return null;
+
+  const resolvedTargetId = input.targetId || input.entityId || '';
+  if (!resolvedTargetId) return null;
+
+  const resolvedTargetType: VersionTargetType =
+    input.targetType ||
+    (input.entityType === 'lore' || input.entityType === 'lore_entry'
+      ? 'lore'
+      : input.entityType === 'timeline' || input.entityType === 'timeline_event'
+      ? 'timeline'
+      : 'entity');
+  const resolvedTargetName =
+    input.targetName || input.entityName || 'Untitled Record';
+
+  // Debounce rapid successive snapshots on the same target (minimum 4 seconds apart unless forced)
+  const now = Date.now();
+  const prevTime = lastSnapshotTimeByTarget.get(resolvedTargetId) || 0;
+  if (!input.force && now - prevTime < 4000) {
+    return null;
+  }
+  lastSnapshotTimeByTarget.set(resolvedTargetId, now);
+
+  const id = makeId('ver');
+  const ref = doc(db, 'entity_versions', id);
+  const versionNumber = Math.floor(now / 1000);
+
+  try {
+    await setDoc(ref, {
+      ownerId: uid,
+      projectId: cleanStr(input.projectId, 128),
+      targetId: cleanStr(resolvedTargetId, 128),
+      targetType: resolvedTargetType,
+      targetName: cleanStr(resolvedTargetName, 240, 'Untitled Record'),
+      versionNumber,
+      changeSummary: cleanStr(input.changeSummary, 500, 'Snapshot recorded'),
+      snapshot: sanitizeAttributes(input.snapshot),
+      authorName: currentActorName(),
+      createdAt: serverTimestamp(),
+    });
+    return id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `entity_versions/${id}`);
+  }
+}
+
+export async function restoreEntityVersion(version: EntityVersion): Promise<void> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Must be signed in');
+  const snap = version.snapshot || {};
+  const targetId = version.targetId || version.entityId;
+  const targetName = version.targetName || version.entityName;
+
+  if (version.targetType === 'entity') {
+    const {
+      category = 'character',
+      subCategory = 'Character',
+      name = targetName,
+      subtitle = '',
+      summary = '',
+      parentId = '',
+      ...restAttrs
+    } = snap;
+
+    const q = query(
+      collection(db, 'entities'),
+      where('ownerId', '==', uid),
+      where('projectId', '==', version.projectId)
+    );
+    const listSnap = await getDocs(q);
+    const exists = listSnap.docs.some((d) => d.id === targetId);
+    if (exists) {
+      await updateEntity(targetId, {
+        category: category as EntityCategory,
+        subCategory,
+        name,
+        subtitle,
+        summary,
+        parentId,
+        attributes: restAttrs,
+        changeSummary: `Restored to version #${version.versionNumber}`,
+      });
+    } else {
+      await createEntity({
+        id: targetId,
+        projectId: version.projectId,
+        category: category as EntityCategory,
+        subCategory,
+        name,
+        subtitle,
+        summary,
+        parentId,
+        attributes: restAttrs,
+      });
+    }
+  } else if (version.targetType === 'lore') {
+    const q = query(
+      collection(db, 'lore_entries'),
+      where('ownerId', '==', uid),
+      where('projectId', '==', version.projectId)
+    );
+    const listSnap = await getDocs(q);
+    const exists = listSnap.docs.some((d) => d.id === targetId);
+    if (exists) {
+      await updateLoreEntry(targetId, {
+        title: snap.title || targetName,
+        category: snap.category || 'World History',
+        era: snap.era || '',
+        summary: snap.summary || '',
+        content: snap.content || '',
+        changeSummary: `Restored to version #${version.versionNumber}`,
+      });
+    } else {
+      await createLoreEntry({
+        id: targetId,
+        projectId: version.projectId,
+        title: snap.title || targetName,
+        category: snap.category || 'World History',
+        era: snap.era || '',
+        summary: snap.summary || '',
+        content: snap.content || '',
+      });
+    }
+  } else if (version.targetType === 'timeline') {
+    const q = query(
+      collection(db, 'timeline_events'),
+      where('ownerId', '==', uid),
+      where('projectId', '==', version.projectId)
+    );
+    const listSnap = await getDocs(q);
+    const exists = listSnap.docs.some((d) => d.id === targetId);
+    if (exists) {
+      await updateTimelineEvent(targetId, {
+        title: snap.title || targetName,
+        dateLabel: snap.dateLabel || 'Year 1',
+        sortOrder: Number(snap.sortOrder) || 0,
+        era: snap.era || '',
+        category: snap.category || 'Historical Event',
+        locationName: snap.locationName || '',
+        participants: snap.participants || '',
+        description: snap.description || '',
+        changeSummary: `Restored to version #${version.versionNumber}`,
+      });
+    } else {
+      await createTimelineEvent({
+        id: targetId,
+        projectId: version.projectId,
+        title: snap.title || targetName,
+        dateLabel: snap.dateLabel || 'Year 1',
+        sortOrder: Number(snap.sortOrder) || 0,
+        era: snap.era || '',
+        category: snap.category || 'Historical Event',
+        locationName: snap.locationName || '',
+        participants: snap.participants || '',
+        description: snap.description || '',
+      });
+    }
+  }
+
+  await recordActivityLog({
+    projectId: version.projectId,
+    actionType: 'Version restored',
+    targetType: version.targetType,
+    targetName,
+    details: `Restored "${targetName}" to snapshot #${version.versionNumber}`,
+  });
+}
+
+// ============================================================================
+// 11. PROJECT AI SETTINGS / CUSTOM AI INSTRUCTIONS (Phase 8.4)
+// ============================================================================
+export function subscribeToProjectAiSettings(
+  uid: string,
+  projectId: string,
+  onData: (setting: ProjectAiSetting | null) => void
+) {
+  const q = query(
+    collection(db, 'project_ai_settings'),
+    where('ownerId', '==', uid),
+    where('projectId', '==', projectId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      if (snap.empty) {
+        onData(null);
+      } else {
+        const d = snap.docs[0];
+        const raw = d.data() as Record<string, any>;
+        const text = raw.instructions || raw.customInstructions || '';
+        onData({
+          id: d.id,
+          ownerId: raw.ownerId || uid,
+          projectId: raw.projectId || projectId,
+          instructions: text,
+          customInstructions: text,
+          isEnabled: Boolean(raw.isEnabled ?? true),
+          createdAt: raw.createdAt,
+          updatedAt: raw.updatedAt,
+        });
+      }
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, 'project_ai_settings')
+  );
+}
+
+export async function saveProjectAiSettings(
+  projectIdOrInput:
+    | string
+    | {
+        projectId: string;
+        instructions?: string;
+        customInstructions?: string;
+        isEnabled: boolean;
+      },
+  maybeInput?: {
+    instructions?: string;
+    customInstructions?: string;
+    isEnabled: boolean;
+  }
+): Promise<void> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Must be signed in');
+
+  const projectId =
+    typeof projectIdOrInput === 'string'
+      ? projectIdOrInput
+      : projectIdOrInput.projectId;
+  const instructionsText =
+    typeof projectIdOrInput === 'string'
+      ? maybeInput?.customInstructions ?? maybeInput?.instructions ?? ''
+      : projectIdOrInput.customInstructions ?? projectIdOrInput.instructions ?? '';
+  const isEnabled =
+    typeof projectIdOrInput === 'string'
+      ? Boolean(maybeInput?.isEnabled ?? true)
+      : Boolean(projectIdOrInput.isEnabled);
+
+  const docId = `aiset_${projectId}`;
+  try {
+    const q = query(
+      collection(db, 'project_ai_settings'),
+      where('ownerId', '==', uid),
+      where('projectId', '==', projectId)
+    );
+    const existingSnap = await getDocs(q);
+    if (!existingSnap.empty) {
+      const existingRef = doc(db, 'project_ai_settings', existingSnap.docs[0].id);
+      await updateDoc(existingRef, {
+        instructions: cleanStr(instructionsText, 6000, ''),
+        isEnabled,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const ref = doc(db, 'project_ai_settings', docId);
+      await setDoc(ref, {
+        ownerId: uid,
+        projectId,
+        instructions: cleanStr(instructionsText, 6000, ''),
+        isEnabled,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    await recordActivityLog({
+      projectId,
+      actionType: 'AI instructions updated',
+      targetType: 'ai_settings',
+      targetName: 'Custom AI Instructions',
+      details: isEnabled
+        ? 'Updated and enabled custom project AI instructions'
+        : 'Disabled custom project AI instructions',
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `project_ai_settings/${docId}`);
+  }
+}
+
+// ============================================================================
+// 12. TRASH & RESTORE / SOFT DELETION (Phase 10.3)
+// ============================================================================
+export function subscribeToTrashItems(
+  uid: string,
+  projectId: string,
+  onData: (items: TrashItem[]) => void
+) {
+  const q = query(
+    collection(db, 'trash_items'),
+    where('ownerId', '==', uid),
+    where('projectId', '==', projectId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: TrashItem[] = snap.docs.map((d) => {
+        const raw = d.data() as Record<string, any>;
+        const name = raw.name || raw.entityName || 'Deleted Item';
+        const itemType = (raw.itemType || 'entity') as VersionTargetType;
+        return {
+          id: d.id,
+          ownerId: raw.ownerId || uid,
+          projectId: raw.projectId || projectId,
+          originalId: raw.originalId || '',
+          itemType,
+          entityType: raw.category || itemType,
+          category: raw.category || 'general',
+          subCategory: raw.subCategory || '',
+          name,
+          entityName: name,
+          summary: raw.summary || '',
+          snapshot: raw.snapshot || {},
+          deletedAt: raw.deletedAt?.toDate
+            ? raw.deletedAt.toDate().toISOString()
+            : raw.deletedAt,
+        };
+      });
+      onData(list);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, 'trash_items')
+  );
+}
+
+async function moveRecordToTrash(input: {
+  projectId: string;
+  originalId: string;
+  itemType: VersionTargetType;
+  category: string;
+  subCategory: string;
+  name: string;
+  summary: string;
+  snapshot: Record<string, string | undefined>;
+}): Promise<string> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Must be signed in');
+  const id = makeId('trash');
+  const ref = doc(db, 'trash_items', id);
+  try {
+    await setDoc(ref, {
+      ownerId: uid,
+      projectId: cleanStr(input.projectId, 128),
+      originalId: cleanStr(input.originalId, 128),
+      itemType: input.itemType,
+      category: cleanStr(input.category, 80, 'general'),
+      subCategory: cleanStr(input.subCategory, 100, ''),
+      name: cleanStr(input.name, 240, 'Deleted Item'),
+      summary: cleanStr(input.summary, 2000, ''),
+      snapshot: sanitizeAttributes(input.snapshot),
+      deletedAt: serverTimestamp(),
+    });
+    await recordActivityLog({
+      projectId: input.projectId,
+      actionType: 'Entity deleted',
+      targetType: input.itemType,
+      targetName: input.name,
+      details: `Moved "${input.name}" (${input.subCategory || input.category}) to Trash`,
+    });
+    return id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `trash_items/${id}`);
+  }
+}
+
+export async function restoreTrashItem(item: TrashItem): Promise<void> {
+  const snap = item.snapshot || {};
+  const itemName = item.name || item.entityName;
+  if (item.itemType === 'entity') {
+    const {
+      category = item.category || 'character',
+      subCategory = item.subCategory || 'Character',
+      name = itemName,
+      subtitle = '',
+      summary = item.summary,
+      parentId = '',
+      ...restAttrs
+    } = snap;
+
+    await createEntity({
+      id: item.originalId,
+      projectId: item.projectId,
+      category: category as EntityCategory,
+      subCategory,
+      name,
+      subtitle,
+      summary,
+      parentId,
+      attributes: restAttrs,
+      skipActivityLog: true,
+    });
+  } else if (item.itemType === 'lore') {
+    await createLoreEntry({
+      id: item.originalId,
+      projectId: item.projectId,
+      title: snap.title || itemName,
+      category: snap.category || item.category || 'World History',
+      era: snap.era || item.subCategory || '',
+      summary: snap.summary || item.summary || '',
+      content: snap.content || item.summary || '',
+    });
+  } else if (item.itemType === 'timeline') {
+    await createTimelineEvent({
+      id: item.originalId,
+      projectId: item.projectId,
+      title: snap.title || itemName,
+      dateLabel: snap.dateLabel || item.subCategory || 'Year 1',
+      sortOrder: Number(snap.sortOrder) || 0,
+      era: snap.era || '',
+      category: snap.category || item.category || 'Historical Event',
+      locationName: snap.locationName || '',
+      participants: snap.participants || '',
+      description: snap.description || item.summary || '',
+    });
+  }
+
+  await deleteDoc(doc(db, 'trash_items', item.id));
+  await recordActivityLog({
+    projectId: item.projectId,
+    actionType: 'Entity restored',
+    targetType: item.itemType,
+    targetName: itemName,
+    details: `Restored "${itemName}" from Trash to active canon`,
+  });
+}
+
+export async function permanentlyDeleteTrashItem(trashId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'trash_items', trashId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `trash_items/${trashId}`);
+  }
+}
+
+// ============================================================================
+// 13. ACTIVITY LOGS (Phase 10.4)
+// ============================================================================
+export function subscribeToActivityLogs(
+  uid: string,
+  projectId: string,
+  onData: (logs: ActivityLog[]) => void
+) {
+  const q = query(
+    collection(db, 'activity_logs'),
+    where('ownerId', '==', uid),
+    where('projectId', '==', projectId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: ActivityLog[] = snap.docs.map((d) => {
+        const raw = d.data() as Record<string, any>;
+        const targetType = raw.targetType || raw.entityType || 'entity';
+        const targetName = raw.targetName || raw.entityName || 'Record';
+        return {
+          id: d.id,
+          ownerId: raw.ownerId || uid,
+          projectId: raw.projectId || projectId,
+          actionType: raw.actionType || 'Action',
+          targetType,
+          entityType: targetType,
+          targetName,
+          entityName: targetName,
+          details: raw.details || '',
+          actorName: raw.actorName || 'Author',
+          createdAt: raw.createdAt?.toDate
+            ? raw.createdAt.toDate().toISOString()
+            : raw.createdAt,
+        };
+      });
+      onData(list);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, 'activity_logs')
+  );
+}
+
+export async function recordActivityLog(input: {
+  projectId: string;
+  actionType: string;
+  targetType?: string;
+  entityType?: string;
+  targetName?: string;
+  entityName?: string;
+  details: string;
+}): Promise<void> {
+  const uid = auth.currentUser?.uid;
+  if (!uid || !input.projectId) return;
+  const id = makeId('act');
+  const ref = doc(db, 'activity_logs', id);
+  const resolvedTargetType = input.targetType || input.entityType || 'entity';
+  const resolvedTargetName = input.targetName || input.entityName || 'Record';
+  try {
+    await setDoc(ref, {
+      ownerId: uid,
+      projectId: cleanStr(input.projectId, 128),
+      actionType: cleanStr(input.actionType, 80, 'Action'),
+      targetType: cleanStr(resolvedTargetType, 80, 'entity'),
+      targetName: cleanStr(resolvedTargetName, 240, 'Record'),
+      details: cleanStr(input.details, 1000, ''),
+      actorName: currentActorName(),
+      createdAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-blocking audit log write
+  }
+}
+
+// ============================================================================
+// 14. VISUAL ASSETS (Phase 11 — Visual Asset Studio & Image Management)
+// ============================================================================
+export function subscribeToVisualAssets(
+  uid: string,
+  projectId: string,
+  onData: (assets: VisualAsset[]) => void
+) {
+  const q = query(
+    collection(db, 'visual_assets'),
+    where('ownerId', '==', uid),
+    where('projectId', '==', projectId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: VisualAsset[] = snap.docs.map((d) => {
+        const raw = d.data() as Record<string, any>;
+        return {
+          id: d.id,
+          ownerId: raw.ownerId || uid,
+          projectId: raw.projectId || projectId,
+          entityId: raw.entityId || '',
+          entityType: raw.entityType || '',
+          entityName: raw.entityName || '',
+          assetCategory: (raw.assetCategory || 'general_reference') as AssetCategory,
+          subRole: raw.subRole || 'Main Visual',
+          fileName: raw.fileName || 'Untitled Asset',
+          mimeType: raw.mimeType || 'image/svg+xml',
+          fileSize: Number(raw.fileSize) || 0,
+          width: Number(raw.width) || 800,
+          height: Number(raw.height) || 1000,
+          storagePath: raw.storagePath || '',
+          publicUrl: raw.publicUrl || '',
+          description: raw.description || '',
+          metadataJson: raw.metadataJson || '',
+          isPrimary: Boolean(raw.isPrimary),
+          createdAt: raw.createdAt?.toDate
+            ? raw.createdAt.toDate().toISOString()
+            : raw.createdAt,
+          updatedAt: raw.updatedAt?.toDate
+            ? raw.updatedAt.toDate().toISOString()
+            : raw.updatedAt,
+        };
+      });
+      list.sort((a, b) => {
+        if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+        const ta = typeof a.createdAt === 'string' ? Date.parse(a.createdAt) || 0 : 0;
+        const tb = typeof b.createdAt === 'string' ? Date.parse(b.createdAt) || 0 : 0;
+        return tb - ta;
+      });
+      onData(list);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, 'visual_assets')
+  );
+}
+
+export async function createVisualAsset(input: {
+  id?: string;
+  projectId: string;
+  entityId?: string;
+  entityType?: string;
+  entityName?: string;
+  assetCategory: AssetCategory;
+  subRole?: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  width: number;
+  height: number;
+  storagePath: string;
+  publicUrl: string;
+  description?: string;
+  metadataJson?: string;
+  isPrimary?: boolean;
+  skipActivityLog?: boolean;
+}): Promise<string> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Must be signed in');
+  const id = input.id && /^[a-zA-Z0-9_-]+$/.test(input.id) ? input.id : makeId('asset');
+  const ref = doc(db, 'visual_assets', id);
+
+  // If setting as primary for an entity or novel_cover, demote existing primary in the same scope
+  if (input.isPrimary) {
+    try {
+      const q = query(
+        collection(db, 'visual_assets'),
+        where('ownerId', '==', uid),
+        where('projectId', '==', input.projectId)
+      );
+      const snap = await getDocs(q);
+      for (const d of snap.docs) {
+        const data = d.data() as Record<string, any>;
+        const sameEntity =
+          input.entityId && input.entityId.length > 0
+            ? data.entityId === input.entityId
+            : data.assetCategory === input.assetCategory && !data.entityId;
+        if (sameEntity && data.isPrimary) {
+          await updateDoc(doc(db, 'visual_assets', d.id), {
+            isPrimary: false,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+    } catch {
+      // Non-blocking primary demotion
+    }
+  }
+
+  const payload = {
+    ownerId: uid,
+    projectId: cleanStr(input.projectId, 128),
+    entityId: cleanStr(input.entityId, 128, ''),
+    entityType: cleanStr(input.entityType, 80, ''),
+    entityName: cleanStr(input.entityName, 240, ''),
+    assetCategory: input.assetCategory,
+    subRole: cleanStr(input.subRole, 120, 'Main Visual'),
+    fileName: cleanStr(input.fileName, 255, 'asset.svg'),
+    mimeType: cleanStr(input.mimeType, 80, 'image/svg+xml'),
+    fileSize: Math.max(0, Math.min(20971520, Math.floor(Number(input.fileSize) || 0))),
+    width: Math.max(0, Math.min(16384, Math.floor(Number(input.width) || 800))),
+    height: Math.max(0, Math.min(16384, Math.floor(Number(input.height) || 1000))),
+    storagePath: cleanStr(input.storagePath, 500, 'uploads/default.svg'),
+    publicUrl: cleanStr(input.publicUrl, 1000, '/api/assets/file/default/default/asset.svg'),
+    description: cleanStr(input.description, 4000, ''),
+    metadataJson: cleanStr(input.metadataJson, 12000, ''),
+    isPrimary: Boolean(input.isPrimary),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(ref, payload);
+    if (!input.skipActivityLog) {
+      await recordActivityLog({
+        projectId: input.projectId,
+        actionType: 'Visual asset uploaded',
+        targetType: input.assetCategory,
+        targetName: payload.fileName,
+        details: `Added visual asset "${payload.fileName}"${payload.entityName ? ` for ${payload.entityName}` : ''} (${payload.subRole})`,
+      });
+    }
+    return id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `visual_assets/${id}`);
+  }
+}
+
+export async function updateVisualAsset(
+  assetId: string,
+  updates: {
+    fileName?: string;
+    assetCategory?: AssetCategory;
+    subRole?: string;
+    entityId?: string;
+    entityType?: string;
+    entityName?: string;
+    description?: string;
+    metadataJson?: string;
+    isPrimary?: boolean;
+    mimeType?: string;
+    fileSize?: number;
+    width?: number;
+    height?: number;
+    storagePath?: string;
+    publicUrl?: string;
+  }
+): Promise<void> {
+  const ref = doc(db, 'visual_assets', assetId);
+  try {
+    const patch: Record<string, any> = {
+      updatedAt: serverTimestamp(),
+    };
+    if (updates.fileName !== undefined) patch.fileName = cleanStr(updates.fileName, 255, 'Asset');
+    if (updates.assetCategory !== undefined) patch.assetCategory = updates.assetCategory;
+    if (updates.subRole !== undefined) patch.subRole = cleanStr(updates.subRole, 120, 'Main Visual');
+    if (updates.entityId !== undefined) patch.entityId = cleanStr(updates.entityId, 128, '');
+    if (updates.entityType !== undefined) patch.entityType = cleanStr(updates.entityType, 80, '');
+    if (updates.entityName !== undefined) patch.entityName = cleanStr(updates.entityName, 240, '');
+    if (updates.description !== undefined) patch.description = cleanStr(updates.description, 4000, '');
+    if (updates.metadataJson !== undefined) patch.metadataJson = cleanStr(updates.metadataJson, 12000, '');
+    if (updates.isPrimary !== undefined) patch.isPrimary = Boolean(updates.isPrimary);
+    if (updates.mimeType !== undefined) patch.mimeType = cleanStr(updates.mimeType, 80, 'image/png');
+    if (updates.fileSize !== undefined)
+      patch.fileSize = Math.max(0, Math.min(20971520, Math.floor(Number(updates.fileSize) || 0)));
+    if (updates.width !== undefined)
+      patch.width = Math.max(0, Math.min(16384, Math.floor(Number(updates.width) || 800)));
+    if (updates.height !== undefined)
+      patch.height = Math.max(0, Math.min(16384, Math.floor(Number(updates.height) || 1000)));
+    if (updates.storagePath !== undefined) patch.storagePath = cleanStr(updates.storagePath, 500, '');
+    if (updates.publicUrl !== undefined) patch.publicUrl = cleanStr(updates.publicUrl, 1000, '');
+
+    await updateDoc(ref, patch);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `visual_assets/${assetId}`);
+  }
+}
+
+export async function setPrimaryVisualAsset(
+  projectId: string,
+  targetAsset: VisualAsset
+): Promise<void> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Must be signed in');
+  try {
+    const q = query(
+      collection(db, 'visual_assets'),
+      where('ownerId', '==', uid),
+      where('projectId', '==', projectId)
+    );
+    const snap = await getDocs(q);
+    for (const d of snap.docs) {
+      const raw = d.data() as Record<string, any>;
+      const sameGroup =
+        targetAsset.entityId && targetAsset.entityId.length > 0
+          ? raw.entityId === targetAsset.entityId
+          : raw.assetCategory === targetAsset.assetCategory && !raw.entityId;
+      if (sameGroup) {
+        const shouldBePrimary = d.id === targetAsset.id;
+        if (Boolean(raw.isPrimary) !== shouldBePrimary) {
+          await updateDoc(doc(db, 'visual_assets', d.id), {
+            isPrimary: shouldBePrimary,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+    }
+    await recordActivityLog({
+      projectId,
+      actionType: 'Primary visual updated',
+      targetType: targetAsset.assetCategory,
+      targetName: targetAsset.fileName,
+      details: `Set "${targetAsset.fileName}" as primary visual${targetAsset.entityName ? ` for ${targetAsset.entityName}` : ''}`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `visual_assets/${targetAsset.id}`);
+  }
+}
+
+export async function deleteVisualAsset(asset: VisualAsset): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'visual_assets', asset.id));
+    await recordActivityLog({
+      projectId: asset.projectId,
+      actionType: 'Visual asset deleted',
+      targetType: asset.assetCategory,
+      targetName: asset.fileName,
+      details: `Removed visual asset "${asset.fileName}"${asset.entityName ? ` from ${asset.entityName}` : ''}`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `visual_assets/${asset.id}`);
+  }
+}
+
+// ============================================================================
 // STARTER UNIVERSE SEEDER (Chronicles of Neran)
 // ============================================================================
 export async function seedStarterProject(): Promise<string> {
@@ -831,7 +2025,7 @@ export async function seedStarterProject(): Promise<string> {
     name: 'Kingdom of Aetheria',
     subtitle: 'Sovereign Realm of the Silver Astrolabe',
     summary:
-      'The oldest surviving monarchy on Continent Neran,renowned for its star-spire observatories and rigid noble houses.',
+      'The oldest surviving monarchy on Continent Neran, renowned for its star-spire observatories and rigid noble houses.',
     parentId: continentId,
     attributes: {
       geography: 'Highland valleys, deep fjords, and silver-veined crags.',
@@ -915,7 +2109,7 @@ export async function seedStarterProject(): Promise<string> {
       strengths: 'Tactical swordsmanship, ancient cipher decryption, High Resonance attunement.',
       weaknesses: 'Chronic insomnia caused by resonance burn; distrusts political allies.',
       abilities: 'Third-Chord Astral Resonance (Void Step, Echo Sight)',
-      relationships: 'Estranged rival to Seraphina Thorne; sworn ward of House Vaelor.',
+      relationships: 'Estranged rival to Seraphina Morcant; sworn ward of House Vaelor.',
       characterDevelopment: 'Moves from solitary archivist to reluctant leader of the Northern Covenant.',
       additionalNotes: 'Carries a cracked astrolabe key.',
     },
@@ -969,8 +2163,8 @@ export async function seedStarterProject(): Promise<string> {
     parentId: '',
     attributes: {
       founder: 'Arch-Chronicler Malakor the Blind',
-      leader: 'Arch-Prelate Seraphina Morcant',
-      headquarters: 'The Silent Vaults beneath the City of Eldoria',
+      leader: 'Seraphina Morcant',
+      headquarters: 'City of Eldoria',
       members: '300 sworn Prelates, Cipher-Monks, and Relic Retrievers',
       hierarchy: 'Novice Scribe -> Cipher-Brother -> Inquisitor -> Arch-Prelate',
       history: 'Established immediately after the Concord of Spirehold to quarantine dangerous pre-Sundering knowledge.',
@@ -993,7 +2187,7 @@ export async function seedStarterProject(): Promise<string> {
     parentId: '',
     attributes: {
       rarity: 'Mythic / Singular',
-      origin: 'Forged in the pre-Sundering observatories of Neran',
+      origin: 'Continent Neran',
       powers: 'Reveals unaltered memory imprints within a one-league radius; unlocks Star-Vault seals.',
       limitations: 'Requires the wielder to sacrifice a personal memory for each alignment.',
       currentOwner: 'Caelum Vaelor',
@@ -1002,7 +2196,7 @@ export async function seedStarterProject(): Promise<string> {
   });
 
   // 5. Power System
-  await createEntity({
+  const powerId = await createEntity({
     projectId,
     category: 'ability',
     subCategory: 'Magic System',
@@ -1112,6 +2306,204 @@ export async function seedStarterProject(): Promise<string> {
     structureRule: '[Given Name] [House Surname], optionally followed by "of the [Order/Seat]".',
     examples: 'Caelum Vaelor, Valerius Vaelor, Lyraea Vesryn, Cassian Morcant',
     isActive: true,
+  });
+
+  // 10. Default Custom AI Instructions
+  await saveProjectAiSettings({
+    projectId,
+    instructions:
+      'Maintain a Dark Editorial Fantasy tone. Respect High Aetherian patronymics (-or, -ant, -ryn) for noble characters, ground magic strictly in the Five Chords of Astral Resonance, and never alter established timeline dates without flagging a continuity note.',
+    isEnabled: true,
+  });
+
+  // 11. Phase 11 Starter Visual Assets (Portraits, Location, Emblem, Artifact, World Map with Pins, and Novel Cover)
+  const uid = auth.currentUser?.uid || 'starter';
+  const baseFileUrl = `/api/assets/file/${uid}/${projectId}`;
+
+  await createVisualAsset({
+    projectId,
+    entityId: char1Id,
+    entityType: 'character',
+    entityName: 'Caelum Vaelor',
+    assetCategory: 'character_portrait',
+    subRole: 'Main Portrait',
+    fileName: 'Caelum_Vaelor_Portrait.jpg',
+    mimeType: 'image/jpeg',
+    fileSize: 284280,
+    width: 900,
+    height: 1200,
+    storagePath: `src/assets/images/nomen_character_portrait_caelum_1794355386782.jpg`,
+    publicUrl: `/src/assets/images/nomen_character_portrait_caelum_1794355386782.jpg`,
+    description: 'Official character portrait of Caelum Vaelor wearing his dark traveling cloak and carrying the cracked astrolabe key.',
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  await createVisualAsset({
+    projectId,
+    entityId: char2Id,
+    entityType: 'character',
+    entityName: 'Seraphina Morcant',
+    assetCategory: 'character_portrait',
+    subRole: 'Main Portrait',
+    fileName: 'Seraphina_Morcant_Portrait.svg',
+    mimeType: 'image/svg+xml',
+    fileSize: 4210,
+    width: 800,
+    height: 1200,
+    storagePath: `uploads/${uid}/${projectId}/Seraphina_Morcant_Portrait.svg`,
+    publicUrl: `${baseFileUrl}/Seraphina_Morcant_Portrait.svg?category=character_portrait&title=Seraphina+Morcant&subtitle=Arch-Prelate+of+the+Obsidian+Quill&aspect=2:3`,
+    description: 'Character portrait of Arch-Prelate Seraphina Morcant in her violet Synod mantle.',
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  await createVisualAsset({
+    projectId,
+    entityId: cityId,
+    entityType: 'location',
+    entityName: 'City of Eldoria',
+    assetCategory: 'location_illustration',
+    subRole: 'Main Location Image',
+    fileName: 'City_of_Eldoria_Caldera.jpg',
+    mimeType: 'image/jpeg',
+    fileSize: 345120,
+    width: 1200,
+    height: 675,
+    storagePath: `src/assets/images/nomen_world_eldoria_caldera_1794355389014.jpg`,
+    publicUrl: `/src/assets/images/nomen_world_eldoria_caldera_1794355389014.jpg`,
+    description: 'Architectural vista of the concentric stone terraces of Eldoria descending into the Mirror Caldera.',
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  await createVisualAsset({
+    projectId,
+    entityId: orgId,
+    entityType: 'organization',
+    entityName: 'Order of the Obsidian Quill',
+    assetCategory: 'organization_emblem',
+    subRole: 'Organization Logo',
+    fileName: 'Obsidian_Quill_Crest.svg',
+    mimeType: 'image/svg+xml',
+    fileSize: 3980,
+    width: 900,
+    height: 900,
+    storagePath: `uploads/${uid}/${projectId}/Obsidian_Quill_Crest.svg`,
+    publicUrl: `${baseFileUrl}/Obsidian_Quill_Crest.svg?category=organization_emblem&title=Order+of+the+Obsidian+Quill&subtitle=Custodians+of+the+Sealed+Archives`,
+    description: 'Heraldic crest displaying the split obsidian feather crossed with the silver key of the Silent Vaults.',
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  await createVisualAsset({
+    projectId,
+    entityId: itemId,
+    entityType: 'item',
+    entityName: 'The Vesryn Astrolabe',
+    assetCategory: 'weapon_artifact',
+    subRole: 'Primary Artifact Image',
+    fileName: 'Vesryn_Astrolabe_Relic.svg',
+    mimeType: 'image/svg+xml',
+    fileSize: 4450,
+    width: 900,
+    height: 900,
+    storagePath: `uploads/${uid}/${projectId}/Vesryn_Astrolabe_Relic.svg`,
+    publicUrl: `${baseFileUrl}/Vesryn_Astrolabe_Relic.svg?category=weapon_artifact&title=The+Vesryn+Astrolabe&subtitle=Three-Ringed+Star-Iron+Relic`,
+    description: 'Detailed artifact study of the three concentric star-iron rings of the Vesryn Astrolabe.',
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  await createVisualAsset({
+    projectId,
+    entityId: powerId,
+    entityType: 'ability',
+    entityName: 'Astral Resonance (The Five Chords)',
+    assetCategory: 'power_system_illustration',
+    subRole: 'Power Rank Diagram',
+    fileName: 'Five_Chords_Resonance_Diagram.svg',
+    mimeType: 'image/svg+xml',
+    fileSize: 4320,
+    width: 900,
+    height: 900,
+    storagePath: `uploads/${uid}/${projectId}/Five_Chords_Resonance_Diagram.svg`,
+    publicUrl: `${baseFileUrl}/Five_Chords_Resonance_Diagram.svg?category=power_system_illustration&title=The+Five+Chords&subtitle=Harmonic+Attunement+to+Star-Iron`,
+    description: 'Harmonic diagram illustrating the Five Chords of Astral Resonance.',
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  const starterMapPins = [
+    {
+      id: 'pin_aetheria',
+      locationEntityId: kingdomId,
+      locationName: 'Kingdom of Aetheria',
+      xPercent: 52,
+      yPercent: 46,
+      note: 'Sovereign Realm of the Silver Astrolabe',
+    },
+    {
+      id: 'pin_northern',
+      locationEntityId: provinceId,
+      locationName: 'Northern Province',
+      xPercent: 44,
+      yPercent: 31,
+      note: 'The Frost-Watch Marches under House Vaelor',
+    },
+    {
+      id: 'pin_eldoria',
+      locationEntityId: cityId,
+      locationName: 'City of Eldoria',
+      xPercent: 36,
+      yPercent: 25,
+      note: 'Terraced capital around the Mirror Caldera',
+    },
+  ];
+
+  await createVisualAsset({
+    projectId,
+    entityId: continentId,
+    entityType: 'location',
+    entityName: 'Continent Neran',
+    assetCategory: 'world_map',
+    subRole: 'Continent Map',
+    fileName: 'Continent_Neran_Cartography.svg',
+    mimeType: 'image/svg+xml',
+    fileSize: 6420,
+    width: 1200,
+    height: 800,
+    storagePath: `uploads/${uid}/${projectId}/Continent_Neran_Cartography.svg`,
+    publicUrl: `${baseFileUrl}/Continent_Neran_Cartography.svg?category=world_map&title=Continent+Neran&subtitle=Royal+Cartographic+Survey+of+the+Seven+Realms&aspect=16:9`,
+    description: 'High-resolution cartographic survey of Continent Neran showing the Glass Sea, Kingdom of Aetheria, and Northern Marches.',
+    metadataJson: JSON.stringify({ pins: starterMapPins }),
+    isPrimary: true,
+    skipActivityLog: true,
+  });
+
+  await createVisualAsset({
+    projectId,
+    entityId: '',
+    entityType: 'project',
+    entityName: 'Chronicles of Neran: The Ashen Crown',
+    assetCategory: 'novel_cover',
+    subRole: 'Novel Cover',
+    fileName: 'Chronicles_of_Neran_Cover.jpg',
+    mimeType: 'image/jpeg',
+    fileSize: 312000,
+    width: 900,
+    height: 1200,
+    storagePath: `src/assets/images/nomen_novel_cover_ashen_crown_1794355389316.jpg`,
+    publicUrl: `/src/assets/images/nomen_novel_cover_ashen_crown_1794355389316.jpg`,
+    description: 'Official Book I novel cover featuring the Ashen Crown and Vesryn Astrolabe motif.',
+    metadataJson: JSON.stringify({
+      coverTitle: 'Chronicles of Neran',
+      coverSubtitle: 'Book I: The Ashen Crown',
+      authorName: currentActorName(),
+      showTypographyOverlay: true,
+    }),
+    isPrimary: true,
+    skipActivityLog: true,
   });
 
   return projectId;

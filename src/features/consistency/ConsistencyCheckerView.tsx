@@ -3,7 +3,9 @@ import {
   AlertCircle,
   AlertTriangle,
   Check,
+  CheckCircle2,
   EyeOff,
+  FileText,
   HelpCircle,
   Lightbulb,
   Plus,
@@ -14,9 +16,11 @@ import {
 import {
   ConsistencyFinding,
   ConsistencyFindingType,
+  ConsistencySeverity,
   EntityRelation,
   LoreEntry,
   Project,
+  ProjectAiSetting,
   TimelineEvent,
   WorldEntity,
 } from '../../types/nomen';
@@ -33,6 +37,7 @@ interface ConsistencyCheckerViewProps {
   relations: EntityRelation[];
   loreEntries: LoreEntry[];
   timelineEvents: TimelineEvent[];
+  aiSettings?: ProjectAiSetting | null;
 }
 
 interface ExtendedFinding extends ConsistencyFinding {
@@ -64,9 +69,39 @@ const FINDING_META: Record<
     icon: <HelpCircle className="w-4 h-4 text-[#93C5FD] shrink-0" />,
   },
   creative_possibility: {
-    label: 'Creative Possibility (Author Confirmation)',
-    colorClass: 'text-[#C4B5FD]',
-    icon: <Lightbulb className="w-4 h-4 text-[#C4B5FD] shrink-0" />,
+    label: 'Creative Possibility',
+    colorClass: 'text-[var(--accent-primary)]',
+    icon: <Lightbulb className="w-4 h-4 text-[var(--accent-primary)] shrink-0" />,
+  },
+};
+
+const SEVERITY_META: Record<
+  ConsistencySeverity,
+  { label: string; badgeClass: string }
+> = {
+  Critical: {
+    label: 'Critical',
+    badgeClass: 'bg-[#3A1820] text-[#FCA5A5] border-[#7F1D1D]',
+  },
+  critical: {
+    label: 'Critical',
+    badgeClass: 'bg-[#3A1820] text-[#FCA5A5] border-[#7F1D1D]',
+  },
+  Warning: {
+    label: 'Warning',
+    badgeClass: 'bg-[#2E2312] text-[#FDE68A] border-[#78350F]',
+  },
+  warning: {
+    label: 'Warning',
+    badgeClass: 'bg-[#2E2312] text-[#FDE68A] border-[#78350F]',
+  },
+  Information: {
+    label: 'Information',
+    badgeClass: 'bg-[#172136] text-[#BFDBFE] border-[#1E3A8A]',
+  },
+  information: {
+    label: 'Information',
+    badgeClass: 'bg-[#172136] text-[#BFDBFE] border-[#1E3A8A]',
   },
 };
 
@@ -76,18 +111,23 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
   relations,
   loreEntries,
   timelineEvents,
+  aiSettings = null,
 }) => {
   const [aiFindings, setAiFindings] = useState<ConsistencyFinding[]>([]);
   const [aiSummary, setAiSummary] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [filterType, setFilterType] = useState<
-    'all' | ConsistencyFindingType
+  const [filterType, setFilterType] = useState<'all' | ConsistencyFindingType>(
+    'all'
+  );
+  const [filterSeverity, setFilterSeverity] = useState<
+    'all' | ConsistencySeverity
   >('all');
   const [dismissedIds, setDismissedIds] = useState<string[]>([]);
+  const [resolvedIds, setResolvedIds] = useState<string[]>([]);
   const [createdNotice, setCreatedNotice] = useState<string | null>(null);
 
-  // Instant Structural & Relational Rule Checks
+  // Instant Structural & Relational Rule Checks with Severity & Evidence (Phase 8.2)
   const localFindings = useMemo<ExtendedFinding[]>(() => {
     const list: ExtendedFinding[] = [];
     const entityNamesLower = new Set(entities.map((e) => e.name.toLowerCase()));
@@ -102,8 +142,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
           list.push({
             id: `local_origin_${char.id}`,
             type: 'missing_information',
+            severity: 'Information',
             title: `Unmapped Character Origin: "${origin}"`,
             involvedEntities: [char.name, origin],
+            evidence: `Character Dossier "${char.name}" -> attributes.origin = "${origin}" (0 matching Location records in World Builder)`,
             explanation: `Character "${char.name}" lists "${origin}" as their origin, but no Location entity with that exact name exists in the World Builder yet.`,
             recommendation: `Create "${origin}" in the World Builder or link it to an existing settlement if intentional.`,
             missingEntitySuggestion: {
@@ -124,8 +166,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
           list.push({
             id: `local_parent_${loc.id}`,
             type: 'confirmed_conflict',
+            severity: 'Critical',
             title: `Orphaned Parent Location Reference on "${loc.name}"`,
             involvedEntities: [loc.name],
+            evidence: `Location "${loc.name}" (${loc.subCategory}) -> parentId="${loc.parentId}" does not match any active entity ID`,
             explanation: `"${loc.name}" references a parent location ID that no longer exists in this project.`,
             recommendation: `Open "${loc.name}" in World Builder and assign a valid parent continent or kingdom.`,
           });
@@ -139,8 +183,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
         list.push({
           id: `local_evt_loc_${evt.id}`,
           type: 'missing_information',
+          severity: 'Information',
           title: `Timeline Event References Unregistered Location "${loc}"`,
           involvedEntities: [evt.title, loc],
+          evidence: `Timeline Event "${evt.title}" (${evt.dateLabel}) -> locationName = "${loc}"`,
           explanation: `Historical event "${evt.title}" (${evt.dateLabel}) takes place at "${loc}", which has no dedicated entry in the World Builder.`,
           recommendation: `Add "${loc}" to the World Builder if it is a significant setting.`,
           missingEntitySuggestion: {
@@ -162,8 +208,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
           list.push({
             id: `local_item_owner_${item.id}`,
             type: 'potential_inconsistency',
+            severity: 'Warning',
             title: `Artifact Owner "${owner}" Not Found in Character Roster`,
             involvedEntities: [item.name, owner],
+            evidence: `Artifact "${item.name}" (${item.subCategory}) -> attributes.currentOwner = "${owner}"`,
             explanation: `Artifact "${item.name}" records "${owner}" as its current owner, which does not match any existing Character or Organization entity.`,
             recommendation: `Verify the spelling of "${owner}" or create a Character profile for them.`,
             missingEntitySuggestion: {
@@ -191,8 +239,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
           list.push({
             id: `local_org_leader_${org.id}`,
             type: 'missing_information',
+            severity: 'Information',
             title: `Faction Leader "${leader}" Has No Character Profile`,
             involvedEntities: [org.name, leader],
+            evidence: `Organization "${org.name}" (${org.subCategory}) -> attributes.leader = "${leader}"`,
             explanation: `"${org.name}" lists "${leader}" as its current leader, but no matching profile exists in the Character Studio.`,
             recommendation: `Create a Character Studio profile for "${leader}" if they appear in the narrative.`,
             missingEntitySuggestion: {
@@ -213,8 +263,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
         list.push({
           id: `local_epoch_collision_${existing.id}_${evt.id}`,
           type: 'potential_inconsistency',
+          severity: 'Warning',
           title: `Chronological Epoch Index Collision (${evt.sortOrder})`,
           involvedEntities: [existing.title, evt.title],
+          evidence: `Event "${existing.title}" (${existing.dateLabel}, sortOrder=${existing.sortOrder}) vs. Event "${evt.title}" (${evt.dateLabel}, sortOrder=${evt.sortOrder})`,
           explanation: `Timeline events "${existing.title}" (${existing.dateLabel}) and "${evt.title}" (${evt.dateLabel}) share the exact same numeric Sort Order (${evt.sortOrder}) despite having different date labels.`,
           recommendation: `Adjust the Epoch Index in the Chronological Timeline if one event occurred before the other.`,
         });
@@ -223,8 +275,50 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
       }
     });
 
+    // 7. Check conflicting alliance + enemy relationships between the same pair
+    const pairMap = new Map<string, EntityRelation[]>();
+    relations.forEach((r) => {
+      const pairKey = [r.sourceEntityId, r.targetEntityId].sort().join('__');
+      const arr = pairMap.get(pairKey) || [];
+      arr.push(r);
+      pairMap.set(pairKey, arr);
+    });
+    pairMap.forEach((rels) => {
+      if (rels.length > 1) {
+        const hasAlly = rels.some((r) =>
+          r.relationType.toLowerCase().includes('allied')
+        );
+        const hasRival = rels.some(
+          (r) =>
+            r.relationType.toLowerCase().includes('enemy') ||
+            r.relationType.toLowerCase().includes('rival') ||
+            r.relationType.toLowerCase().includes('betrayed')
+        );
+        if (hasAlly && hasRival) {
+          list.push({
+            id: `local_rel_conflict_${rels[0].id}`,
+            type: 'confirmed_conflict',
+            severity: 'Critical',
+            title: `Contradictory Relationship Ties: ${rels[0].sourceEntityName} & ${rels[0].targetEntityName}`,
+            involvedEntities: [
+              rels[0].sourceEntityName,
+              rels[0].targetEntityName,
+            ],
+            evidence: rels
+              .map(
+                (r) =>
+                  `${r.sourceEntityName} -> "${r.relationType}" -> ${r.targetEntityName}`
+              )
+              .join(' AND '),
+            explanation: `Both an alliance and a hostile rivalry/betrayal are recorded simultaneously between ${rels[0].sourceEntityName} and ${rels[0].targetEntityName}.`,
+            recommendation: `Clarify whether the alliance preceded the betrayal in the relationship notes or remove the outdated relation.`,
+          });
+        }
+      }
+    });
+
     return list;
-  }, [entities, timelineEvents]);
+  }, [entities, timelineEvents, relations]);
 
   const handleRunDeepAiAudit = async () => {
     setLoading(true);
@@ -233,6 +327,10 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
       const res = await runConsistencyCheckApi({
         projectTitle: project.title,
         worldSettings: project.worldSettings,
+        customAiInstructions:
+          aiSettings?.isEnabled && aiSettings.customInstructions
+            ? aiSettings.customInstructions
+            : undefined,
         entities: entities.map((e) => ({
           id: e.id,
           category: e.category,
@@ -286,9 +384,7 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
     }
   };
 
-  const handleCreateSuggestedEntity = async (
-    finding: ExtendedFinding
-  ) => {
+  const handleCreateSuggestedEntity = async (finding: ExtendedFinding) => {
     const sug = finding.missingEntitySuggestion;
     if (!sug) return;
 
@@ -306,8 +402,9 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
           : { history: sug.summary },
     });
 
+    setResolvedIds((prev) => [...prev, finding.id]);
     setCreatedNotice(
-      `Created "${sug.name}" (${sug.subCategory}) in project canon.`
+      `Created "${sug.name}" (${sug.subCategory}) in project canon and marked issue resolved.`
     );
     setTimeout(() => setCreatedNotice(null), 3500);
   };
@@ -315,34 +412,42 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
   const allFindings: ExtendedFinding[] = [
     ...aiFindings,
     ...localFindings,
-  ].filter((f) => !dismissedIds.includes(f.id));
+  ].filter(
+    (f) => !dismissedIds.includes(f.id) && !resolvedIds.includes(f.id)
+  );
 
-  const visibleFindings =
-    filterType === 'all'
-      ? allFindings
-      : allFindings.filter((f) => f.type === filterType);
+  const visibleFindings = allFindings.filter((f) => {
+    if (filterType !== 'all' && f.type !== filterType) return false;
+    const sev = f.severity || 'Warning';
+    if (filterSeverity !== 'all' && sev !== filterSeverity) return false;
+    return true;
+  });
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 className="text-2xl md:text-3xl font-semibold text-[#F3F1FA] font-serif-display">
+          <h1 className="text-2xl md:text-3xl font-semibold text-[var(--text-primary)] font-serif-display">
             Worldbuilding Consistency & Continuity Checker
           </h1>
-          <p className="text-sm text-[#8E89A6] mt-0.5">
-            Identify timeline contradictions, conflicting family allegiances, orphaned locations, and narrative possibilities. NOMEN never overwrites your canon automatically.
+          <p className="text-sm text-[var(--text-muted)] mt-0.5">
+            Identify timeline contradictions, conflicting family allegiances, orphaned locations, and narrative possibilities with severity ratings and direct canon evidence.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {dismissedIds.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {(dismissedIds.length > 0 || resolvedIds.length > 0) && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setDismissedIds([])}
+              onClick={() => {
+                setDismissedIds([]);
+                setResolvedIds([]);
+              }}
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              Restore Dismissed ({dismissedIds.length})
+              Reset Dismissed/Resolved (
+              {dismissedIds.length + resolvedIds.length})
             </Button>
           )}
           <Button
@@ -358,61 +463,89 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
         </div>
       </div>
 
-      {/* Category Filter Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-[#111520] p-4 border border-[#1E2436] rounded-xl">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {(
-            [
-              { id: 'all', label: `All Findings (${allFindings.length})` },
-              {
-                id: 'confirmed_conflict',
-                label: `Confirmed Conflicts (${
-                  allFindings.filter((f) => f.type === 'confirmed_conflict')
-                    .length
-                })`,
-              },
-              {
-                id: 'potential_inconsistency',
-                label: `Potential Inconsistencies (${
-                  allFindings.filter(
-                    (f) => f.type === 'potential_inconsistency'
-                  ).length
-                })`,
-              },
-              {
-                id: 'missing_information',
-                label: `Missing Information (${
-                  allFindings.filter((f) => f.type === 'missing_information')
-                    .length
-                })`,
-              },
-              {
-                id: 'creative_possibility',
-                label: `Creative Possibilities (${
-                  allFindings.filter((f) => f.type === 'creative_possibility')
-                    .length
-                })`,
-              },
-            ] as const
-          ).map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setFilterType(tab.id)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                filterType === tab.id
-                  ? 'bg-[#1D2336] text-[#F3F1FA]'
-                  : 'text-[#8E89A6] hover:text-[#ECEAF2]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+      {/* Category & Severity Filter Bar */}
+      <div className="bg-[var(--bg-surface)] p-4 border border-[var(--border-subtle)] rounded-xl space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                { id: 'all', label: `All Findings (${allFindings.length})` },
+                {
+                  id: 'confirmed_conflict',
+                  label: `Confirmed Conflicts (${
+                    allFindings.filter((f) => f.type === 'confirmed_conflict')
+                      .length
+                  })`,
+                },
+                {
+                  id: 'potential_inconsistency',
+                  label: `Potential Inconsistencies (${
+                    allFindings.filter(
+                      (f) => f.type === 'potential_inconsistency'
+                    ).length
+                  })`,
+                },
+                {
+                  id: 'missing_information',
+                  label: `Missing Information (${
+                    allFindings.filter((f) => f.type === 'missing_information')
+                      .length
+                  })`,
+                },
+                {
+                  id: 'creative_possibility',
+                  label: `Creative Possibilities (${
+                    allFindings.filter((f) => f.type === 'creative_possibility')
+                      .length
+                  })`,
+                },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setFilterType(tab.id)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                  filterType === tab.id
+                    ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <span className="text-xs text-[var(--text-muted)] flex items-center gap-1.5">
+            <ShieldCheck className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+            Author-controlled continuity diagnostics
+          </span>
         </div>
 
-        <span className="text-xs text-[#736E8A] flex items-center gap-1.5">
-          <ShieldCheck className="w-3.5 h-3.5 text-[#8B7EC8]" />
-          Author-controlled continuity diagnostics
-        </span>
+        {/* Severity Filter Row */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border-subtle)]">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-[var(--text-muted)]">Severity Filter:</span>
+            {(['all', 'Critical', 'Warning', 'Information'] as const).map(
+              (sev) => (
+                <button
+                  key={sev}
+                  onClick={() => setFilterSeverity(sev)}
+                  className={`px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${
+                    filterSeverity === sev
+                      ? 'bg-[var(--accent-primary)]/20 text-[var(--accent-primary)] border border-[var(--accent-primary)]/40'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  {sev === 'all' ? 'All Severities' : sev}
+                </button>
+              )
+            )}
+          </div>
+
+          <div className="text-xs text-[var(--text-muted)] font-mono-tabular">
+            {resolvedIds.length} Resolved · {dismissedIds.length} Dismissed
+          </div>
+        </div>
       </div>
 
       {createdNotice && (
@@ -429,11 +562,11 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
       )}
 
       {aiSummary && (
-        <div className="p-5 bg-[#111520] border border-[#262D42] rounded-xl space-y-1.5">
-          <p className="text-xs font-semibold text-[#C4B5FD]">
+        <div className="p-5 bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-xl space-y-1.5">
+          <p className="text-xs font-semibold text-[var(--accent-primary)]">
             AI Continuity Auditor Summary
           </p>
-          <p className="text-sm text-[#E4E1EE] leading-relaxed">{aiSummary}</p>
+          <p className="text-sm text-[var(--text-primary)] leading-relaxed">{aiSummary}</p>
         </div>
       )}
 
@@ -449,16 +582,30 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
           {visibleFindings.map((f) => {
             const meta =
               FINDING_META[f.type] || FINDING_META.potential_inconsistency;
+            const sev: ConsistencySeverity =
+              f.severity ||
+              (f.type === 'confirmed_conflict'
+                ? 'Critical'
+                : f.type === 'potential_inconsistency'
+                ? 'Warning'
+                : 'Information');
+            const sevStyle = SEVERITY_META[sev];
+
             return (
               <div
                 key={f.id}
-                className="p-5 bg-[#111520] border border-[#1E2436] rounded-xl space-y-3"
+                className="p-5 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-xl space-y-3"
               >
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   <div className="flex items-start gap-3">
                     <div className="mt-0.5">{meta.icon}</div>
                     <div>
                       <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span
+                          className={`px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded border ${sevStyle.badgeClass}`}
+                        >
+                          {sevStyle.label}
+                        </span>
                         <span className={`font-semibold ${meta.colorClass}`}>
                           {meta.label}
                         </span>
@@ -466,17 +613,17 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
                           <>
                             <span
                               aria-hidden="true"
-                              className="text-[#68647D]"
+                              className="text-[var(--text-muted)]"
                             >
                               ·
                             </span>
-                            <span className="text-[#9D97B8]">
+                            <span className="text-[var(--text-secondary)]">
                               Involved: {f.involvedEntities.join(', ')}
                             </span>
                           </>
                         )}
                       </div>
-                      <h3 className="text-lg font-semibold text-[#F3F1FA] font-serif-display mt-1">
+                      <h3 className="text-lg font-semibold text-[var(--text-primary)] font-serif-display mt-1">
                         {f.title}
                       </h3>
                     </div>
@@ -494,31 +641,53 @@ export const ConsistencyCheckerView: React.FC<ConsistencyCheckerViewProps> = ({
                       </Button>
                     )}
                     <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setResolvedIds((prev) => [...prev, f.id])}
+                      title="Mark issue as resolved"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#34D399]" />
+                      Mark Resolved
+                    </Button>
+                    <Button
                       variant="ghost"
                       size="sm"
                       onClick={() =>
                         setDismissedIds((prev) => [...prev, f.id])
                       }
-                      title="Mark as intentional creative choice"
+                      title="Dismiss as intentional creative choice"
                     >
                       <EyeOff className="w-3.5 h-3.5" />
-                      Mark Intentional
+                      Dismiss
                     </Button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-[#1A2030] text-xs leading-relaxed">
+                {/* Supporting Canon Evidence */}
+                {f.evidence && (
+                  <div className="p-2.5 bg-[var(--bg-canvas)] border border-[var(--border-subtle)] rounded-lg flex items-start gap-2 text-xs font-mono-tabular text-[var(--text-secondary)]">
+                    <FileText className="w-3.5 h-3.5 text-[var(--accent-primary)] shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-[var(--text-muted)]">
+                        Supporting Canon Evidence:{' '}
+                      </span>
+                      <span className="text-[var(--text-primary)]">{f.evidence}</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-[var(--border-subtle)] text-xs leading-relaxed">
                   <div>
-                    <p className="text-[#736E8A] font-medium mb-1">
+                    <p className="text-[var(--text-muted)] font-medium mb-1">
                       Analysis & Context
                     </p>
-                    <p className="text-[#D0CCE0]">{f.explanation}</p>
+                    <p className="text-[var(--text-secondary)]">{f.explanation}</p>
                   </div>
                   <div>
-                    <p className="text-[#736E8A] font-medium mb-1">
-                      Editorial Recommendation (Author Decision)
+                    <p className="text-[var(--text-muted)] font-medium mb-1">
+                      Suggested Resolution (Author Decision)
                     </p>
-                    <p className="text-[#E4E1EE]">{f.recommendation}</p>
+                    <p className="text-[var(--text-primary)]">{f.recommendation}</p>
                   </div>
                 </div>
               </div>

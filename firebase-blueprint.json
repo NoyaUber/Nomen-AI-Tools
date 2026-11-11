@@ -450,6 +450,308 @@
         }
       },
       "required": ["ownerId", "projectId", "name", "pronunciation", "category", "interpretation", "inspiration", "suitability", "titleOrVariation", "createdAt"]
+    },
+    "EntityVersion": {
+      "title": "EntityVersion",
+      "description": "Immutable version history snapshot for an entity, lore chronicle, or timeline event.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetType": {
+          "type": "string",
+          "enum": ["entity", "lore", "timeline"],
+          "maxLength": 40
+        },
+        "targetName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "versionNumber": {
+          "type": "number"
+        },
+        "changeSummary": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "snapshot": {
+          "type": "object",
+          "description": "Native map storing the versioned snapshot fields."
+        },
+        "authorName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "targetId", "targetType", "targetName", "versionNumber", "changeSummary", "snapshot", "authorName", "createdAt"]
+    },
+    "ProjectAiSetting": {
+      "title": "ProjectAiSetting",
+      "description": "Custom project-level AI instructions and tone configuration.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "instructions": {
+          "type": "string",
+          "maxLength": 6000
+        },
+        "isEnabled": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "instructions", "isEnabled", "createdAt", "updatedAt"]
+    },
+    "TrashItem": {
+      "title": "TrashItem",
+      "description": "Soft-deleted worldbuilding record awaiting restoration or permanent removal.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "originalId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "itemType": {
+          "type": "string",
+          "enum": ["entity", "lore", "timeline"],
+          "maxLength": 40
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "subCategory": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "snapshot": {
+          "type": "object",
+          "description": "Full original document fields for lossless restoration."
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "originalId", "itemType", "category", "subCategory", "name", "summary", "snapshot", "deletedAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit log of important user actions within a project.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "actionType": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "targetType": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "targetName": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "actorName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectId", "actionType", "targetType", "targetName", "details", "actorName", "createdAt"]
+    },
+    "VisualAsset": {
+      "title": "VisualAsset",
+      "description": "Metadata and storage reference for a project visual asset (character portrait, location illustration, map, emblem, artifact, power system illustration, or novel cover).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "entityId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "entityType": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "entityName": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "assetCategory": {
+          "type": "string",
+          "enum": [
+            "character_portrait",
+            "character_illustration",
+            "location_illustration",
+            "kingdom_civilization",
+            "kingdom_illustration",
+            "organization_emblem",
+            "weapon_artifact",
+            "armor_equipment",
+            "magic_ability",
+            "power_system_illustration",
+            "power_system",
+            "world_map",
+            "novel_cover",
+            "general_reference",
+            "visual_reference"
+          ],
+          "maxLength": 60
+        },
+        "subRole": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "mimeType": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "fileSize": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "storagePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "publicUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "metadataJson": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "isPrimary": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "projectId",
+        "entityId",
+        "entityType",
+        "entityName",
+        "assetCategory",
+        "subRole",
+        "fileName",
+        "mimeType",
+        "fileSize",
+        "width",
+        "height",
+        "storagePath",
+        "publicUrl",
+        "description",
+        "metadataJson",
+        "isPrimary",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -488,6 +790,27 @@
     "/favorites/{favoriteId}": {
       "schema": "Favorite",
       "description": "Favorited name candidates and generated items."
+    },
+    "/entity_versions/{versionId}": {
+      "schema": "EntityVersion",
+      "description": "Version snapshots for entities, lore, and timeline events."
+    },
+    "/project_ai_settings/{settingId}": {
+      "schema": "ProjectAiSetting",
+      "description": "Custom AI instructions per project."
+    },
+    "/trash_items/{trashId}": {
+      "schema": "TrashItem",
+      "description": "Soft-deleted project records."
+    },
+    "/activity_logs/{activityId}": {
+      "schema": "ActivityLog",
+      "description": "Project activity audit trail."
+    },
+    "/visual_assets/{assetId}": {
+      "schema": "VisualAsset",
+      "description": "Project visual assets, portraits, illustrations, maps, emblems, and novel covers."
     }
   }
 }
+
