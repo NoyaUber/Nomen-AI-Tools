@@ -149,7 +149,7 @@ function renderEditorialSvgPlate(opts: {
 </svg>`;
 }
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 async function startServer() {
   const app = express();
@@ -1326,6 +1326,9 @@ Return a structured JSON object with:
       return res.status(500).json({ error: msg });
     }
   });
+
+  // Always serve generated artwork in /src/assets so production builds resolve /src/assets/images/*
+  app.use('/src/assets', express.static(path.join(__dirname, 'src/assets')));
 
   // Vite middleware in development, static files in production
   if (process.env.NODE_ENV !== 'production') {
